@@ -1,5 +1,18 @@
 @echo off
-REM Wrapper. The interpreter lives in venv\bin (venv built by MSYS2 Python),
-REM not in venv\Scripts. Keep this file ASCII-only: cmd.exe reads .cmd in the
-REM OEM codepage and mangles UTF-8 comments into bogus commands.
-"%~dp0venv\bin\python.exe" -m rfid %*
+REM Wrapper around "python -m rfid".
+REM
+REM Works with either venv layout: Scripts (standard Windows Python) or bin
+REM (venv built by an MSYS2/MinGW Python, as on the original dev machine).
+REM
+REM Keep this file ASCII-only: cmd.exe reads .cmd in the OEM codepage and
+REM mangles UTF-8 comments into bogus commands.
+setlocal
+set "PY=%~dp0venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=%~dp0venv\bin\python.exe"
+if not exist "%PY%" (
+  echo Python not found in venv.
+  echo Create it:  py -3 -m venv venv
+  echo Then:       venv\Scripts\python.exe -m pip install -r requirements.txt
+  exit /b 1
+)
+"%PY%" -m rfid %*

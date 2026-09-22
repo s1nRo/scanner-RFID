@@ -21,3 +21,4 @@ __pycache__/
 CLAUDE.md
 example/
 dump*.txt
+driver/
