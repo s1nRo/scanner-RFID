@@ -1,0 +1,8 @@
+# Что не попадает в автоархив «Source code» на странице релиза.
+# Это только про архив: в репозитории файлы остаются на месте.
+# Смысл — чтобы скачавший релиз получил то, что запускают, без обвязки
+# разработчика.
+.gitattributes   export-ignore
+.gitignore       export-ignore
+requirements-dev.txt export-ignore
+tests/           export-ignore
