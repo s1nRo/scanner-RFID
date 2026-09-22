@@ -191,6 +191,38 @@ class TestWriting:
         assert sheet["D4"].fill.patternType is None
         assert sheet["C5"].fill.patternType is None  # отсутствующий
 
+    def test_other_lesson_the_same_day_is_not_late(self, tmp_path):
+        """marks общий на предмет, но у групп пара бывает в разное время.
+
+        Без разделения по разрыву дневная группа целиком красилась бы жёлтым,
+        хотя пришла на своё занятие вовремя.
+        """
+        morning = make_roster_file(tmp_path / "утро.xlsx", names=["Утренний Алексей"])
+        afternoon = make_roster_file(tmp_path / "день.xlsx", names=["Дневной Борис"])
+        marks = {DAY_ONE: {
+            "Утренний Алексей": datetime(2026, 9, 20, 9, 0),
+            "Дневной Борис": datetime(2026, 9, 20, 14, 0),
+        }}
+        for path in (morning, afternoon):
+            R.write_attendance(R.read_roster(path), marks)
+
+        for path in (morning, afternoon):
+            assert load_workbook(path).active["C3"].fill.patternType is None, path.name
+
+    def test_late_to_a_shared_lesson_is_still_caught(self, tmp_path):
+        """Обе группы на одной лекции — опоздавшая обязана быть видна."""
+        first = make_roster_file(tmp_path / "а.xlsx", names=["Вовремя Анна"])
+        second = make_roster_file(tmp_path / "б.xlsx", names=["Опоздавший Борис"])
+        marks = {DAY_ONE: {
+            "Вовремя Анна": datetime(2026, 9, 20, 9, 0),
+            "Опоздавший Борис": datetime(2026, 9, 20, 9, 20),
+        }}
+        for path in (first, second):
+            R.write_attendance(R.read_roster(path), marks)
+
+        assert load_workbook(first).active["C3"].fill.patternType is None
+        assert load_workbook(second).active["C3"].fill.patternType == "solid"
+
     @pytest.mark.parametrize("still_present", [True, False])
     def test_reexport_clears_outdated_late_fill(self, roster_file, still_present):
         parsed = R.read_roster(roster_file)
@@ -348,3 +380,91 @@ class TestFullRoster:
     def test_note_not_counted(self, full_roster_file):
         names = [s.full_name for s in R.read_roster(full_roster_file).students]
         assert not any("Староста" in n for n in names)
+
+
+class TestSessionSplitting:
+    """Разбиение приходов на занятия по разрыву во времени."""
+
+    @staticmethod
+    def at(hour, minute=0):
+        return datetime(2026, 9, 20, hour, minute)
+
+    def test_one_lesson_gives_one_start(self):
+        arrivals = [self.at(9, 0), self.at(9, 5), self.at(9, 20)]
+        assert R.session_starts(arrivals) == [self.at(9, 0)]
+
+    def test_next_lesson_opens_a_new_session(self):
+        arrivals = [self.at(9, 0), self.at(9, 5), self.at(14, 0), self.at(14, 3)]
+        assert R.session_starts(arrivals) == [self.at(9, 0), self.at(14, 0)]
+
+    def test_back_to_back_lessons_are_separated(self):
+        """Пара 9:00-10:40, перемена 20 минут, следующая ровно в 11:00."""
+        arrivals = [self.at(9, 0), self.at(9, 6), self.at(11, 0), self.at(11, 5)]
+        assert R.session_starts(arrivals) == [self.at(9, 0), self.at(11, 0)]
+
+    def test_exactly_one_cycle_later_is_a_new_lesson(self):
+        """Пары идут ровно через цикл — сравнение обязано быть нестрогим."""
+        assert R.session_starts([self.at(9, 0), self.at(11, 0)]) == [
+            self.at(9, 0), self.at(11, 0)
+        ]
+
+    def test_tap_during_the_break_does_not_poison_the_next_lesson(self):
+        """Карта, приложенная на перемене, не должна создавать занятие.
+
+        Иначе следующая пара целиком считалась бы опоздавшей.
+        """
+        arrivals = [self.at(9, 0), self.at(10, 45), self.at(11, 0), self.at(11, 6)]
+        starts = R.session_starts(arrivals)
+        assert starts == [self.at(9, 0), self.at(11, 0)]
+        assert R.is_late(self.at(11, 0), starts) is False
+        assert R.is_late(self.at(11, 6), starts) is False
+
+    def test_order_of_input_does_not_matter(self):
+        jumbled = [self.at(14, 3), self.at(9, 0), self.at(14, 0), self.at(9, 5)]
+        assert R.session_starts(jumbled) == [self.at(9, 0), self.at(14, 0)]
+
+    def test_no_arrivals(self):
+        assert R.session_starts([]) == []
+
+    def test_latecomer_does_not_open_a_new_lesson(self):
+        """Иначе опоздавший сам себя объявил бы началом занятия."""
+        arrivals = [self.at(9, 0), self.at(9, 40)]
+        assert R.session_starts(arrivals) == [self.at(9, 0)]
+        assert R.is_late(self.at(9, 40), R.session_starts(arrivals))
+
+    def test_very_late_arrival_still_counts_as_late(self):
+        """Пара идёт 1:40 — пришедший через час двадцать всё ещё опоздал."""
+        arrivals = [self.at(9, 0), self.at(10, 20)]
+        assert R.session_starts(arrivals) == [self.at(9, 0)]
+        assert R.is_late(self.at(10, 20), R.session_starts(arrivals))
+
+    def test_arrivals_do_not_drift_into_one_long_session(self):
+        """Отсчёт от начала пары, а не от предыдущего прихода.
+
+        Иначе цепочка приходов по чуть-чуть растянула бы одно занятие
+        на весь день.
+        """
+        arrivals = [self.at(9, 0), self.at(10, 0), self.at(11, 0), self.at(12, 0)]
+        assert R.session_starts(arrivals) == [self.at(9, 0), self.at(11, 0)]
+
+    def test_cycle_is_longer_than_the_late_window(self):
+        """Иначе разделение занятий съело бы саму подсветку опозданий."""
+        assert R.LESSON_CYCLE > R.LATE_AFTER
+
+    def test_cycle_is_lesson_plus_break(self):
+        assert R.LESSON_CYCLE == R.LESSON_LENGTH + R.BREAK_LENGTH
+
+    def test_arrival_is_matched_to_its_own_lesson(self):
+        starts = R.session_starts([self.at(9, 0), self.at(14, 0)])
+        assert R.session_start_for(self.at(9, 30), starts) == self.at(9, 0)
+        assert R.session_start_for(self.at(14, 30), starts) == self.at(14, 0)
+
+    def test_arrival_before_any_lesson_has_no_start(self):
+        starts = R.session_starts([self.at(9, 0)])
+        assert R.session_start_for(self.at(8, 0), starts) is None
+        assert R.is_late(self.at(8, 0), starts) is False
+
+    def test_late_only_after_the_threshold(self):
+        starts = R.session_starts([self.at(9, 0)])
+        assert R.is_late(self.at(9, 0) + R.LATE_AFTER, starts) is True
+        assert R.is_late(self.at(9, 9), starts) is False

@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -38,6 +39,22 @@ DATE_HEADER_FORMAT = "%d.%m"
 ABSENT_MARK = "—"
 LATE_AFTER = timedelta(minutes=10)
 LATE_FILL = PatternFill(fill_type="solid", fgColor="FFFFFF00")
+
+# Расписание со слов пользователя: пара 1 час 40 минут, перемена 20 минут,
+# то есть занятия начинаются ровно каждые два часа.
+LESSON_LENGTH = timedelta(hours=1, minutes=40)
+BREAK_LENGTH = timedelta(minutes=20)
+
+# По циклу приходы режутся на занятия: marks приходит общий на предмет,
+# а у групп пара бывает в разное время — без разделения дневная группа
+# целиком красилась бы как опоздавшая. Общая лекция двух групп при этом
+# остаётся одним занятием, и опоздавшая группа на ней видна.
+#
+# Порогом служит ВЕСЬ цикл, а не одна пара: иначе карта, приложенная
+# на перемене, создала бы фантомное занятие, и следующая пара целиком
+# оказалась бы опоздавшей. Приход на перемене лучше отнести к предыдущей
+# паре, чем испортить следующую.
+LESSON_CYCLE = LESSON_LENGTH + BREAK_LENGTH
 
 # Сколько строк сверху просматривать в поисках шапки.
 _HEADER_SEARCH_DEPTH = 15
@@ -196,6 +213,40 @@ def _next_free_column(sheet: Worksheet, roster: Roster, taken: dict[str, int]) -
     return max([*taken.values(), roster.first_date_col - 1]) + 1
 
 
+def session_starts(arrivals: Iterable[datetime]) -> list[datetime]:
+    """Начала занятий за день.
+
+    Новое занятие начинается, когда приход отстоит от начала текущего
+    на LESSON_CYCLE или больше. Именно от начала, а не от предыдущего
+    прихода: опоздавший на час не должен объявлять себя началом новой пары.
+
+    Сравнение нестрогое, и это существенно: пары идут ровно через цикл,
+    поэтому приход точно через два часа — это уже следующая пара.
+    """
+    starts: list[datetime] = []
+    current: datetime | None = None
+    for at in sorted(arrivals):
+        if current is None or at - current >= LESSON_CYCLE:
+            starts.append(at)
+            current = at
+    return starts
+
+
+def session_start_for(at: datetime, starts: list[datetime]) -> datetime | None:
+    """Начало того занятия, к которому относится этот приход."""
+    found = None
+    for start in starts:
+        if start > at:
+            break
+        found = start
+    return found
+
+
+def is_late(at: datetime, starts: list[datetime]) -> bool:
+    start = session_start_for(at, starts)
+    return start is not None and at - start >= LATE_AFTER
+
+
 def write_attendance(
     roster: Roster,
     marks: dict[date, dict[str, datetime]],
@@ -226,7 +277,9 @@ def write_attendance(
             sheet.column_dimensions[get_column_letter(column)].width = 7
 
         # marks содержит все группы предмета: отсчёт общий для предмета за день.
-        first_arrival = min(marks[day].values(), default=None)
+        # marks приходит общий на предмет, поэтому приходы сначала разбиваются
+        # на занятия по разрыву во времени — см. session_starts().
+        starts = session_starts(marks[day].values())
         present = {_normalize(name): at for name, at in marks[day].items()}
         for student in roster.students:
             at = present.get(_normalize(student.full_name))
@@ -239,7 +292,7 @@ def write_attendance(
             cell = sheet.cell(row=student.row, column=column)
             cell.value = at.strftime("%H:%M") if at else absent_mark
             cell.alignment = Alignment(horizontal="center")
-            if at is not None and first_arrival is not None and at - first_arrival >= LATE_AFTER:
+            if at is not None and is_late(at, starts):
                 cell.fill = LATE_FILL
             elif cell.fill == LATE_FILL:
                 # Повторный экспорт должен снимать устаревшую подсветку.
