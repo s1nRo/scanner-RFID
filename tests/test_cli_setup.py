@@ -13,6 +13,7 @@ from rfid import cli, excel
 from rfid.cli import common, subjects
 from tests.helpers import make_roster_file
 
+
 @pytest.fixture
 def answers(monkeypatch):
     """Подменяет ввод заранее заготовленными ответами."""

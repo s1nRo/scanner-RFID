@@ -59,7 +59,7 @@ def ask(prompt: str) -> str:
     try:
         return input(prompt).strip()
     except EOFError:
-        raise Interrupted(_NO_INPUT_HINT)
+        raise Interrupted(_NO_INPUT_HINT) from None
 
 
 def confirm(question: str) -> bool:
@@ -107,4 +107,4 @@ def parse_date(text: str | None) -> date:
     try:
         return datetime.strptime(text, DATE_INPUT).date()
     except ValueError:
-        raise Interrupted(f"  Дата должна быть в виде ДД.ММ.ГГГГ, получено: {text!r}")
+        raise Interrupted(f"  Дата должна быть в виде ДД.ММ.ГГГГ, получено: {text!r}") from None

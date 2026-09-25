@@ -11,8 +11,15 @@
 """
 
 from .models import (
-    CardConflict, DayRow, GroupStat, ImportStatus, MarkResult, MarkStatus,
-    Student, Subject, UnknownCard,
+    CardConflict,
+    DayRow,
+    GroupStat,
+    ImportStatus,
+    MarkResult,
+    MarkStatus,
+    Student,
+    Subject,
+    UnknownCard,
 )
 from .schema import NO_SUBJECT, SCHEMA_VERSION
 from .storage import BUSY_TIMEOUT_MS, IMPORT_RAW, Storage

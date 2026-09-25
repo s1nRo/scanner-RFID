@@ -41,3 +41,18 @@ venvPath = "."
 venv = "venv"
 pythonVersion = "3.11"
 pythonPlatform = "Windows"
+
+# Линтер: uvx ruff check (под MSYS-Python колёс ruff нет, поэтому не в dev).
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # стиль pycodestyle
+    "F",        # pyflakes: неиспользуемое, неопределённое
+    "I",        # порядок импортов
+    "B",        # bugbear: частые ошибки
+    "UP",       # современный синтаксис для target-version
+]

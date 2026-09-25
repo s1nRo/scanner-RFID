@@ -21,8 +21,15 @@ from pathlib import Path
 from ..names import normalize_name
 from ..scanner.codes import CardCode
 from .models import (
-    CardConflict, DayRow, GroupStat, ImportStatus, MarkResult, MarkStatus,
-    Student, Subject, UnknownCard,
+    CardConflict,
+    DayRow,
+    GroupStat,
+    ImportStatus,
+    MarkResult,
+    MarkStatus,
+    Student,
+    Subject,
+    UnknownCard,
 )
 from .schema import migrate
 

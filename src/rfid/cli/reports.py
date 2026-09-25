@@ -119,7 +119,7 @@ def cmd_students(args) -> int:
             try:
                 code = parse_manual(args.code)
             except CardCodeError as exc:
-                raise Interrupted(str(exc))
+                raise Interrupted(str(exc)) from None
             print("Привязка снята." if storage.remove_student(code) else "Такой карты нет.")
             return 0
 

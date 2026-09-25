@@ -52,9 +52,10 @@ def setup(tmp_path):
     db = tmp_path / "late.db"
     with Storage(db) as s:
         subject = s.add_subject("Бургеростроение")
-        for code, name in zip(CARDS, NAMES):
+        for code, name in zip(CARDS, NAMES, strict=False):
             s.add_student(code, name, GROUP)
-        for code, t in zip(CARDS, [at(9, 0), at(9, 5), at(9, 25), at(10, 2)]):
+        times = [at(9, 0), at(9, 5), at(9, 25), at(10, 2)]
+        for code, t in zip(CARDS, times, strict=False):
             s.mark(code, subject, at=t)
     return SimpleNamespace(db=db, tables=tables, subject="Бургеростроение", date=None)
 

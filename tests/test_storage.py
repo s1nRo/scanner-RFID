@@ -307,8 +307,10 @@ class TestMigrationFromV1:
                 raw TEXT, UNIQUE(day, card_code));
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO meta VALUES('schema_version','1');
-            INSERT INTO students VALUES(1,'A10007002A','Иванов Иван','ИС-21','2026-09-20T09:00:00');
-            INSERT INTO attendance VALUES(1,'2026-09-20','2026-09-20T09:02:13','A10007002A',1,'raw');
+            INSERT INTO students VALUES(1,'A10007002A','Иванов Иван','ИС-21',
+                '2026-09-20T09:00:00');
+            INSERT INTO attendance VALUES(1,'2026-09-20','2026-09-20T09:02:13','A10007002A',
+                1,'raw');
             """
         )
         conn.commit()
@@ -372,10 +374,13 @@ class TestMigrationFromV2:
                 raw TEXT, UNIQUE(day, subject_id, card_code));
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO meta VALUES('schema_version','2');
-            INSERT INTO students VALUES(1,'A10007002A','Иванов  Иван','ИС-21','2026-09-20T09:00:00');
+            INSERT INTO students VALUES(1,'A10007002A','Иванов  Иван','ИС-21',
+                '2026-09-20T09:00:00');
             INSERT INTO subjects VALUES(1,'Матанализ','','2026-09-20T09:00:00');
-            INSERT INTO attendance VALUES(1,'2026-09-20','2026-09-20T09:02:13','A10007002A',1,1,'raw');
-            INSERT INTO attendance VALUES(2,'2026-09-20','2026-09-20T09:03:00','B20008002B',NULL,1,'raw');
+            INSERT INTO attendance VALUES(1,'2026-09-20','2026-09-20T09:02:13','A10007002A',
+                1,1,'raw');
+            INSERT INTO attendance VALUES(2,'2026-09-20','2026-09-20T09:03:00','B20008002B',
+                NULL,1,'raw');
             """
         )
         conn.commit()

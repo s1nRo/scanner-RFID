@@ -15,8 +15,14 @@ from .codes import NO_CARD, CardCode, CardCodeError, parse_line, parse_manual
 from .factory import MODES, ReaderUnavailable, make_reader
 from .manual import KeyboardCardReader, MockCardReader
 from .ports import (
-    KNOWN_PIDS, PID_FTDI, PID_IRONLOGIC, VID, PortInfo,
-    available_ports, find_reader_port, no_port_explanation,
+    KNOWN_PIDS,
+    PID_FTDI,
+    PID_IRONLOGIC,
+    VID,
+    PortInfo,
+    available_ports,
+    find_reader_port,
+    no_port_explanation,
 )
 from .serial_reader import SerialCardReader
 

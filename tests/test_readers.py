@@ -47,7 +47,7 @@ class TestLineFraming:
 
     def test_garbage_is_ignored(self):
         """Мусор и не-ASCII байты не должны ни падать, ни превращаться в отметку."""
-        garbage = b"\x00\xff###\r\n" + "чепуха".encode("utf-8") + b"\r\n"
+        garbage = b"\x00\xff###\r\n" + "чепуха".encode() + b"\r\n"
         assert collect(garbage, 3) == []
 
     def test_lone_lf_also_terminates_line(self):

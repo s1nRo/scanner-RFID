@@ -12,8 +12,13 @@ from .common import DATE_INPUT, Interrupted
 from .home import guard_mock
 from .keys import STOP_HINT, make_stop_watcher
 from .subjects import (
-    Candidate, all_candidates, bound_count, by_number, choose_subject,
-    print_candidates, require_rosters,
+    Candidate,
+    all_candidates,
+    bound_count,
+    by_number,
+    choose_subject,
+    print_candidates,
+    require_rosters,
 )
 from .tables import fill_and_report
 from .view import ConsoleView
@@ -38,7 +43,7 @@ def _open_reader(args, view: ConsoleView) -> CardReader:
             should_stop=make_stop_watcher(),
         )
     except ReaderUnavailable as exc:
-        raise Interrupted(str(exc))
+        raise Interrupted(str(exc)) from None
 
 
 # ----------------------------------------------------------------------- scan
