@@ -8,7 +8,8 @@ from .. import pipeline
 from ..db import CardConflict, Storage
 from ..scanner import CardCode, CardReader, ReaderUnavailable, make_reader
 from . import common
-from .common import DATE_INPUT, Interrupted, guard_mock
+from .common import DATE_INPUT, Interrupted
+from .home import guard_mock
 from .keys import STOP_HINT, make_stop_watcher
 from .subjects import (
     Candidate, all_candidates, bound_count, by_number, choose_subject,

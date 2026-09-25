@@ -5,6 +5,8 @@ tables/ — корень, в котором лежат папки предмет
 и файлов не переносит.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from rfid import cli, excel
@@ -110,6 +112,7 @@ class TestMisplacedFiles:
         make_subject(tmp_path, "Физика")
         assert excel.misplaced_rosters(tmp_path) == ()
 
+
 class TestMockGuard:
     """Заглушка не должна писать в рабочую базу.
 
@@ -117,21 +120,27 @@ class TestMockGuard:
     карты к случайно выбранным людям прямо в боевых данных.
     """
 
-    class MockArgs:
-        mode = "mock"
-        db = cli.DEFAULT_DB
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(cli.HOME_ENV, str(tmp_path))
+        return tmp_path
 
-    def test_mock_into_default_db_refused(self):
+    def args(self, db, mode="mock"):
+        return SimpleNamespace(mode=mode, db=db, home=None)
+
+    def test_mock_into_working_db_refused(self, home):
         with pytest.raises(cli.Interrupted, match="mock"):
-            cli.guard_mock(self.MockArgs())
+            cli.guard_mock(self.args(home / cli.DB_FILE))
 
-    def test_mock_into_other_db_allowed(self, tmp_path):
-        args = self.MockArgs()
-        args.db = tmp_path / "demo.db"
-        cli.guard_mock(args)  # не должно бросать
+    def test_same_db_by_another_spelling_refused(self, home):
+        """«data/../data/attendance.db» — всё та же рабочая база."""
+        sneaky = home / "data" / ".." / cli.DB_FILE
+        with pytest.raises(cli.Interrupted, match="mock"):
+            cli.guard_mock(self.args(sneaky))
 
-    def test_real_modes_are_not_restricted(self):
+    def test_mock_into_other_db_allowed(self, home):
+        cli.guard_mock(self.args(home / "data" / "demo.db"))  # не должно бросать
+
+    def test_real_modes_are_not_restricted(self, home):
         for mode in ("auto", "serial", "keyboard"):
-            args = self.MockArgs()
-            args.mode = mode
-            cli.guard_mock(args)
+            cli.guard_mock(self.args(home / cli.DB_FILE, mode))

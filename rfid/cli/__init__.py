@@ -27,6 +27,7 @@
     reports.py   report, late, subjects, students, unknown
     tables.py    export, import — файлы групп
     admin.py     doctor, ports, reset
+    home.py      рабочая папка: где data/ и tables/, от текущей папки не зависит
     view.py      вывод отметок в консоль: цвет, звук (реализует pipeline.View)
     keys.py      клавиша выхода из цикла отметки, без ожидания
 """
@@ -39,13 +40,14 @@ from pathlib import Path
 from .. import pipeline, scanner
 from . import common
 from .admin import cmd_doctor, cmd_ports, cmd_reset
-from .common import DEFAULT_DB, EXIT_WORDS, TABLES_DIR, Cancelled, Interrupted, guard_mock
+from .common import EXIT_WORDS, Cancelled, Interrupted
+from .home import DB_FILE, HOME_ENV, TABLES_DIR, guard_mock, resolve_paths
 from .marking import cmd_enroll, cmd_scan, cmd_whois
 from .reports import cmd_late, cmd_report, cmd_students, cmd_subjects, cmd_unknown
 from .tables import cmd_export, cmd_import
 
 __all__ = [
-    "DEFAULT_DB", "MENU", "TABLES_DIR", "Cancelled", "Interrupted",
+    "DB_FILE", "HOME_ENV", "MENU", "TABLES_DIR", "Cancelled", "Interrupted",
     "build_parser", "guard_mock", "main",
     "cmd_doctor", "cmd_enroll", "cmd_export", "cmd_import", "cmd_late", "cmd_menu",
     "cmd_ports", "cmd_report", "cmd_reset", "cmd_scan", "cmd_students",
@@ -104,8 +106,12 @@ def cmd_menu(args) -> int:
             continue
 
         # Общие флаги надо протащить: иначе выбранный каталог потеряется.
+        # Пути здесь уже абсолютные — разрешены при запуске меню.
+        common_flags = ["--db", str(args.db), "--tables", str(args.tables)]
+        if args.home:
+            common_flags += ["--home", str(args.home)]
         try:
-            main(["--db", str(args.db), "--tables", str(args.tables), *command])
+            main([*common_flags, *command])
         except KeyboardInterrupt:
             print()
 
@@ -132,11 +138,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rfid", description="Учёт посещаемости по RFID-картам IronLogic."
     )
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB,
-                        help=f"файл базы (умолч. {DEFAULT_DB})")
-    parser.add_argument("--tables", type=Path, default=TABLES_DIR,
-                        help=f"папка с предметами (умолч. {TABLES_DIR})")
-    parser.set_defaults(func=cmd_menu)
+    parser.add_argument("--home", type=Path,
+                        help=f"рабочая папка с data/ и tables/ (иначе {HOME_ENV} "
+                             "или текущая папка, если это она)")
+    parser.add_argument("--db", type=Path,
+                        help=f"файл базы; относительный — от рабочей папки (умолч. {DB_FILE})")
+    parser.add_argument("--tables", type=Path,
+                        help="папка с предметами; относительная — от рабочей папки "
+                             f"(умолч. {TABLES_DIR})")
+    parser.set_defaults(func=cmd_menu, needs_home=True)
     sub = parser.add_subparsers(dest="command")
 
     def command(name: str, func, help_text: str) -> argparse.ArgumentParser:
@@ -194,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="marks — отметки и предметы, cards — привязки карт, all — всё")
     reset.add_argument("--yes", action="store_true", help="без подтверждения")
 
-    command("ports", cmd_ports, "список COM-портов")
+    command("ports", cmd_ports, "список COM-портов").set_defaults(needs_home=False)
     command("doctor", cmd_doctor, "проверить железо, зависимости и базу")
     return parser
 
@@ -203,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
     common.setup_console()
     args = build_parser().parse_args(argv)
     try:
+        if args.needs_home:
+            resolve_paths(args)
         return args.func(args)
     except Interrupted as exc:
         if str(exc):

@@ -1,4 +1,4 @@
-"""Общее для всех команд: пути по умолчанию, ввод, подтверждения, выбор из списка.
+"""Общее для всех команд: ввод, подтверждения, выбор из списка.
 
 Весь ввод идёт через ask() — тесты подменяют именно её, поэтому остальные
 модули зовут её как common.ask(...), а не импортируют по имени.
@@ -9,10 +9,7 @@ from __future__ import annotations
 import io
 import sys
 from datetime import date, datetime
-from pathlib import Path
 
-DEFAULT_DB = Path("data/attendance.db")
-TABLES_DIR = Path("tables")
 DATE_INPUT = "%d.%m.%Y"
 
 # Выход из меню и из выбора. «й» — это q в русской раскладке.
@@ -20,7 +17,7 @@ EXIT_WORDS = ("0", "q", "й", "выход", "exit", "quit")
 
 _NO_INPUT_HINT = (
     "\n  Ввод недоступен — здесь нет интерактивного терминала.\n"
-    "  Откройте обычное окно PowerShell в папке проекта и запустите там."
+    "  Откройте обычное окно PowerShell и запустите rfid.cmd там."
 )
 
 _console_ready = False
@@ -111,20 +108,3 @@ def parse_date(text: str | None) -> date:
         return datetime.strptime(text, DATE_INPUT).date()
     except ValueError:
         raise Interrupted(f"  Дата должна быть в виде ДД.ММ.ГГГГ, получено: {text!r}")
-
-
-def guard_mock(args) -> None:
-    """Не давать заглушке писать в рабочую базу.
-
-    Урок из практики: показательный прогон с --mode mock проигрывает
-    вымышленные карты, но пишет туда же, куда настоящая работа, — и молча
-    привязывает чужие карты к случайным людям. Требуем отдельную базу.
-    """
-    if getattr(args, "mode", None) != "mock":
-        return
-    if Path(args.db) == DEFAULT_DB:
-        raise Interrupted(
-            "  Режим --mode mock проигрывает вымышленные карты и испортил бы\n"
-            f"  рабочую базу {DEFAULT_DB}. Укажите отдельную:\n"
-            "      rfid --db data/demo.db ... --mode mock"
-        )

@@ -27,6 +27,7 @@ def cmd_doctor(args) -> int:
     ok = True
     print("Проверка системы")
     print(_RULE)
+    print(f"[ OK ] рабочая папка: {args.home or '(не задана, пути указаны явно)'}")
 
     port = find_reader_port()
     if port:

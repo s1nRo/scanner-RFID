@@ -15,6 +15,7 @@ class Args:
     def __init__(self, tmp_path):
         self.db = tmp_path / "att.db"
         self.tables = tmp_path / "tables"
+        self.home = None
         self.subject = None
 
 
@@ -70,6 +71,13 @@ class TestLooping:
         cli.cmd_menu(args)
         assert "--db" in ran[0] and str(args.db) in ran[0]
         assert "--tables" in ran[0] and str(args.tables) in ran[0]
+
+    def test_home_is_passed_on(self, tmp_path, answers, ran):
+        answers += ["5", "", "0"]
+        args = Args(tmp_path)
+        args.home = tmp_path
+        cli.cmd_menu(args)
+        assert "--home" in ran[0] and str(tmp_path) in ran[0]
 
 
 class TestBackFromPicker:

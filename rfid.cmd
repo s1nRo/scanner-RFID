@@ -7,6 +7,9 @@ REM
 REM Keep this file ASCII-only: cmd.exe reads .cmd in the OEM codepage and
 REM mangles UTF-8 comments into bogus commands.
 setlocal
+REM The working folder (data\ and tables\) is where this file lives,
+REM no matter which folder the command is started from.
+set "RFID_HOME=%~dp0"
 set "PY=%~dp0venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=%~dp0venv\bin\python.exe"
 if not exist "%PY%" (
