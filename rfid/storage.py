@@ -24,6 +24,11 @@ SCHEMA_VERSION = 2
 
 NO_SUBJECT = "(без предмета)"
 
+# Сколько ждать, если база занята другим процессом, прежде чем сдаться.
+# Пара идёт полтора часа, очередь у считывателя живая — пять секунд
+# ожидания несопоставимы с потерянной отметкой.
+BUSY_TIMEOUT_MS = 5000
+
 _BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS students (
     id         INTEGER PRIMARY KEY,
@@ -169,6 +174,11 @@ class Storage:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
+        # Без таймаута занятая база отвечает отказом мгновенно, и отметка
+        # теряется. А занять её легко: второе окно программы, запущенный
+        # параллельно export, открытый просмотрщик. Лучше подождать
+        # несколько секунд, чем потерять студента.
+        self.conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         self._migrate()
 
     def __enter__(self) -> "Storage":
@@ -202,11 +212,17 @@ class Storage:
         self.conn.execute(_ATTENDANCE_DDL.format(table="attendance"))
         self.conn.executescript(_INDEXES)
         self._repair_orphan_marks()
-        self.conn.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (str(SCHEMA_VERSION),),
-        )
+        # Пишем, только если версия и правда изменилась: иначе каждое открытие
+        # базы брало бы блокировку записи и мешало другому окну программы.
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None or row["value"] != str(SCHEMA_VERSION):
+            self.conn.execute(
+                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(SCHEMA_VERSION),),
+            )
 
     def _repair_orphan_marks(self) -> int:
         """Отдать безымянные отметки студентам, чьи карты уже известны.
@@ -217,6 +233,16 @@ class Storage:
         каждом открытии базы: дёшево, идемпотентно и чинит записи, испорченные
         прежними версиями программы.
         """
+        # Сначала смотрим, есть ли что чинить: иначе каждое открытие базы
+        # брало бы блокировку записи и мешало другому окну программы.
+        orphan = self.conn.execute(
+            "SELECT 1 FROM attendance a WHERE a.student_id IS NULL "
+            "  AND EXISTS (SELECT 1 FROM students s WHERE s.card_code = a.card_code) "
+            "LIMIT 1"
+        ).fetchone()
+        if orphan is None:
+            return 0
+
         cur = self.conn.execute(
             "UPDATE attendance SET student_id = ("
             "    SELECT s.id FROM students s WHERE s.card_code = attendance.card_code"

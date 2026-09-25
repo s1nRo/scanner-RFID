@@ -382,18 +382,31 @@ def cmd_scan(args) -> int:
         view.status(f"{STOP_HINT}. Ctrl+C тоже работает.")
         print()
 
+        tally = None
+        failure: BaseException | None = None
         try:
             tally = pipeline.run(reader, storage, view, subject, debounce=args.debounce)
         except KeyboardInterrupt:
-            tally = None
             print()
+        except Exception as exc:
+            # Что бы ни сорвалось, отметки уже в базе — их надо выгрузить,
+            # а не потерять вместе с трассировкой.
+            failure = exc
 
         marked, duplicates, unknown = pipeline.tally_line(tally) if tally else (0, 0, 0)
         view.summary(marked, duplicates, unknown)
 
+        if tally and pipeline.failed_count(tally):
+            print(f"\n!!! Не удалось записать отметок: {pipeline.failed_count(tally)}.")
+            print("    Эти студенты НЕ отмечены, их надо провести заново.")
+
+        if failure is not None:
+            print(f"\n!!! Сеанс прерван ошибкой: {failure}")
+            print("    Записанное до этого момента сохранено и будет выгружено.")
+
         if not args.no_export:
             _fill_and_report(storage, subject, folder)
-    return 0
+    return 1 if failure is not None else 0
 
 
 def _fill_and_report(storage: Storage, subject: Subject, folder: R.SubjectFolder) -> None:

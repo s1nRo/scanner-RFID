@@ -55,10 +55,18 @@ def _fill_one(
     marks: dict[date, dict[str, datetime]],
     group_of: dict[str, str],
 ) -> FillResult:
+    # Ошибки ловятся пофайлово и широко: битый или чужой файл в папке не имеет
+    # права лишить остальные группы записи. Один раз уже случалось — пустой
+    # .xlsx рядом ронял выгрузку целиком, и отметки не доходили ни до кого.
     try:
         parsed = R.read_roster(path)
     except R.RosterError as exc:
         return FillResult(path, path.stem, error=str(exc))
+    except Exception as exc:
+        return FillResult(
+            path, path.stem,
+            error=f"не удалось прочитать ({type(exc).__name__}: {exc})",
+        )
 
     try:
         R.write_attendance(parsed, marks)
@@ -67,8 +75,16 @@ def _fill_one(
             path,
             parsed.group_name,
             len(parsed.students),
-            error=(f"файл открыт в Excel — закройте и повторите. "
-                   f"Отметки в базе целы."),
+            error=("файл открыт в Excel — закройте и повторите. "
+                   "Отметки в базе целы."),
+        )
+    except Exception as exc:
+        return FillResult(
+            path,
+            parsed.group_name,
+            len(parsed.students),
+            error=(f"не удалось записать ({type(exc).__name__}: {exc}). "
+                   "Отметки в базе целы, повторите rfid export."),
         )
 
     return FillResult(
