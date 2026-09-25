@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from rfid.codes import NO_CARD, CardCode, CardCodeError, parse_line, parse_manual
+from rfid.scanner import NO_CARD, CardCode, CardCodeError, parse_line, parse_manual
+from tests.helpers import card
 
 # Синтетические идентификаторы двух разных карт, не связанные со студентами.
 CARD_A_LINE = "Em-Marine[A100] 007,42"
@@ -35,15 +36,15 @@ class TestSampleLines:
 
     def test_cards_do_not_collide(self):
         """Главная причина, по которой префикс входит в код."""
-        a = parse_line(CARD_A_LINE)
-        b = parse_line(CARD_B_LINE)
+        a = card(CARD_A_LINE)
+        b = card(CARD_B_LINE)
         assert a != b
         assert a.canonical != b.canonical
 
     def test_prefix_actually_matters(self):
         """Один и тот же 007,42 с разными префиксами — разные карты."""
-        one = parse_line("Em-Marine[A100] 007,42")
-        two = parse_line("Em-Marine[B200] 007,42")
+        one = card("Em-Marine[A100] 007,42")
+        two = card("Em-Marine[B200] 007,42")
         assert one.canonical != two.canonical
 
     def test_line_endings_are_stripped(self):
@@ -70,7 +71,7 @@ class TestNonCardLines:
 class TestCanonicalRoundTrip:
     @pytest.mark.parametrize("line", [CARD_A_LINE, CARD_B_LINE])
     def test_round_trip(self, line):
-        code = parse_line(line)
+        code = card(line)
         assert CardCode.from_canonical(code.canonical) == CardCode(
             prefix=code.prefix, facility=code.facility, number=code.number
         )

@@ -91,7 +91,7 @@ class CardCode:
         return self.canonical
 
     @classmethod
-    def from_canonical(cls, text: str) -> "CardCode":
+    def from_canonical(cls, text: str) -> CardCode:
         """Собрать код обратно из канонической записи."""
         m = _CANONICAL_RE.match(text.strip())
         if not m:

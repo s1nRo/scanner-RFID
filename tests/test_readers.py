@@ -7,9 +7,11 @@
 
 import pytest
 
+from rfid import scanner
 from rfid.pipeline import Debounce
-from rfid import readers
-from rfid.readers import MockCardReader, Scan, SerialCardReader
+from rfid.scanner import MockCardReader, Scan, SerialCardReader
+from rfid.scanner import ports as port_search
+from tests.helpers import Exhausted, FakeSerial
 
 CARD_A = "Em-Marine[A100] 007,42"
 CARD_B = "Em-Marine[B200] 008,43"
@@ -18,33 +20,13 @@ CARD_B = "Em-Marine[B200] 008,43"
 REAL_STREAM = (CARD_A + "\r\n" + "No card\r\n" + CARD_B + "\r\n" + "No card\r\n").encode()
 
 
-class _Exhausted(Exception):
-    """Данные в заглушке кончились — способ выйти из бесконечного цикла."""
-
-
-class FakeSerial:
-    """Отдаёт заранее заданный поток кусками указанного размера."""
-
-    def __init__(self, data: bytes, chunk: int):
-        self.data = data
-        self.chunk = chunk
-        self.pos = 0
-
-    def read(self, _size: int) -> bytes:
-        if self.pos >= len(self.data):
-            raise _Exhausted
-        piece = self.data[self.pos : self.pos + self.chunk]
-        self.pos += self.chunk
-        return piece
-
-
 def collect(data: bytes, chunk: int) -> list[Scan]:
     reader = SerialCardReader("COM_TEST")
     scans = []
     try:
         for scan in reader._read_forever(FakeSerial(data, chunk)):
             scans.append(scan)
-    except _Exhausted:
+    except Exhausted:
         pass
     return scans
 
@@ -65,7 +47,7 @@ class TestLineFraming:
 
     def test_garbage_is_ignored(self):
         """Мусор и не-ASCII байты не должны ни падать, ни превращаться в отметку."""
-        garbage = b"\x00\xff###\r\n" + "чепуха".encode("utf-8") + b"\r\n"
+        garbage = b"\x00\xff###\r\n" + "чепуха".encode() + b"\r\n"
         assert collect(garbage, 3) == []
 
     def test_lone_lf_also_terminates_line(self):
@@ -96,30 +78,30 @@ class TestReaderChoice:
     """Режим auto не должен подменять чтение карты набором кода."""
 
     def test_auto_without_port_refuses(self, monkeypatch):
-        monkeypatch.setattr(readers, "find_reader_port", lambda: None)
-        with pytest.raises(readers.ReaderUnavailable):
-            readers.make_reader("auto")
+        monkeypatch.setattr(port_search, "find_reader_port", lambda: None)
+        with pytest.raises(scanner.ReaderUnavailable):
+            scanner.make_reader("auto")
 
     def test_auto_with_port_uses_serial(self, monkeypatch):
-        monkeypatch.setattr(readers, "find_reader_port", lambda: "COM9")
-        reader = readers.make_reader("auto")
-        assert isinstance(reader, readers.SerialCardReader)
+        monkeypatch.setattr(port_search, "find_reader_port", lambda: "COM9")
+        reader = scanner.make_reader("auto")
+        assert isinstance(reader, scanner.SerialCardReader)
         assert reader.port == "COM9"
 
     def test_serial_without_port_refuses(self, monkeypatch):
-        monkeypatch.setattr(readers, "find_reader_port", lambda: None)
-        with pytest.raises(readers.ReaderUnavailable):
-            readers.make_reader("serial")
+        monkeypatch.setattr(port_search, "find_reader_port", lambda: None)
+        with pytest.raises(scanner.ReaderUnavailable):
+            scanner.make_reader("serial")
 
     def test_manual_entry_only_when_asked(self):
-        assert isinstance(readers.make_reader("keyboard"), readers.KeyboardCardReader)
+        assert isinstance(scanner.make_reader("keyboard"), scanner.KeyboardCardReader)
 
     def test_explanation_mentions_manual_mode(self):
-        assert "--mode keyboard" in readers.no_port_explanation()
+        assert "--mode keyboard" in scanner.no_port_explanation()
 
     def test_unknown_mode_rejected(self):
         with pytest.raises(ValueError):
-            readers.make_reader("телепатия")
+            scanner.make_reader("телепатия")
 
 
 class TestDebounce:
@@ -154,40 +136,40 @@ class TestPortMatching:
 
     @staticmethod
     def port(device, pid, serial=None):
-        return readers.PortInfo(device, readers.VID, pid, serial, "")
+        return scanner.PortInfo(device, scanner.VID, pid, serial, "")
 
     def test_ironlogic_pid_recognised(self):
-        assert self.port("COM3", readers.PID_IRONLOGIC, "ILTEST01").is_reader
+        assert self.port("COM3", scanner.PID_IRONLOGIC, "ILTEST01").is_reader
 
     def test_standard_ftdi_pid_recognised(self):
-        assert self.port("COM3", readers.PID_FTDI, "ILTEST01").is_reader
+        assert self.port("COM3", scanner.PID_FTDI, "ILTEST01").is_reader
 
     def test_foreign_device_is_not_a_reader(self):
-        assert not readers.PortInfo("COM9", 0x1A86, 0x7523, None, "CH340").is_reader
+        assert not scanner.PortInfo("COM9", 0x1A86, 0x7523, None, "CH340").is_reader
 
     def test_ironlogic_pid_wins(self, monkeypatch):
         ports = [
-            self.port("COM9", readers.PID_FTDI, "FTTEST01"),
-            self.port("COM3", readers.PID_IRONLOGIC, "ILTEST01"),
+            self.port("COM9", scanner.PID_FTDI, "FTTEST01"),
+            self.port("COM3", scanner.PID_IRONLOGIC, "ILTEST01"),
         ]
-        monkeypatch.setattr(readers, "available_ports", lambda: ports)
-        assert readers.find_reader_port() == "COM3"
+        monkeypatch.setattr(port_search, "available_ports", lambda: ports)
+        assert scanner.find_reader_port() == "COM3"
 
     def test_serial_prefix_breaks_the_tie_on_6001(self, monkeypatch):
         """Два FTDI на 6001: наш тот, чей серийник начинается с IL."""
         ports = [
-            self.port("COM9", readers.PID_FTDI, "FTTEST01"),
-            self.port("COM4", readers.PID_FTDI, "ILTEST01"),
+            self.port("COM9", scanner.PID_FTDI, "FTTEST01"),
+            self.port("COM4", scanner.PID_FTDI, "ILTEST01"),
         ]
-        monkeypatch.setattr(readers, "available_ports", lambda: ports)
-        assert readers.find_reader_port() == "COM4"
+        monkeypatch.setattr(port_search, "available_ports", lambda: ports)
+        assert scanner.find_reader_port() == "COM4"
 
     def test_lone_ftdi_still_accepted(self, monkeypatch):
-        ports = [self.port("COM7", readers.PID_FTDI, None)]
-        monkeypatch.setattr(readers, "available_ports", lambda: ports)
-        assert readers.find_reader_port() == "COM7"
+        ports = [self.port("COM7", scanner.PID_FTDI, None)]
+        monkeypatch.setattr(port_search, "available_ports", lambda: ports)
+        assert scanner.find_reader_port() == "COM7"
 
     def test_nothing_suitable(self, monkeypatch):
-        monkeypatch.setattr(readers, "available_ports",
-                            lambda: [readers.PortInfo("COM1", None, None, None, "")])
-        assert readers.find_reader_port() is None
+        monkeypatch.setattr(port_search, "available_ports",
+                            lambda: [scanner.PortInfo("COM1", None, None, None, "")])
+        assert scanner.find_reader_port() is None

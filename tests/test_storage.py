@@ -5,11 +5,11 @@ from datetime import date, datetime
 
 import pytest
 
-from rfid.codes import parse_line
-from rfid.storage import NO_SUBJECT, MarkStatus, Storage
+from rfid.db import NO_SUBJECT, MarkStatus, Storage
+from tests.helpers import card, must
 
-CARD_A = parse_line("Em-Marine[A100] 007,42")
-CARD_B = parse_line("Em-Marine[B200] 008,43")
+CARD_A = card("Em-Marine[A100] 007,42")
+CARD_B = card("Em-Marine[B200] 008,43")
 
 MORNING = datetime(2026, 9, 20, 9, 2, 13)
 NOON = datetime(2026, 9, 20, 12, 30, 0)
@@ -101,7 +101,7 @@ class TestMarking:
             s.add_student(CARD_A, "Иванов Иван", "ИС-21")
             assert s.mark(CARD_A, subject, at=MORNING).status is MarkStatus.MARKED
         with Storage(path) as s:
-            subject = s.find_subject("Матанализ")
+            subject = must(s.find_subject("Матанализ"))
             assert s.mark(CARD_A, subject, at=NOON).status is MarkStatus.DUPLICATE
 
     def test_next_day_is_a_new_mark(self, db, math):
@@ -160,7 +160,7 @@ class TestUnknownResolution:
     def test_resolving_backfills_across_subjects(self, db, math, physics):
         db.mark(CARD_A, math, at=MORNING)
         db.mark(CARD_A, physics, at=NOON)
-        student, backfilled = db.resolve_unknown(CARD_A, "Иванов Иван", "ИС-21")
+        student, backfilled = db.bind_card(CARD_A, "Иванов Иван", "ИС-21")
         assert backfilled == 2
         assert db.unknown_cards() == []
         assert db.day_rows(date(2026, 9, 20), math)[0].present
@@ -168,7 +168,7 @@ class TestUnknownResolution:
     def test_resolving_does_not_touch_other_cards(self, db, math):
         db.mark(CARD_A, math, at=MORNING)
         db.mark(CARD_B, math, at=MORNING)
-        _, backfilled = db.resolve_unknown(CARD_A, "Иванов Иван")
+        _, backfilled = db.bind_card(CARD_A, "Иванов Иван")
         assert backfilled == 1
         assert [u.card_code for u in db.unknown_cards()] == ["B20008002B"]
 
@@ -239,7 +239,7 @@ class TestEnrollingAfterUnknownMarks:
 
         with Storage(path) as s:
             assert s.unknown_cards() == []
-            row = s.day_rows(date(2026, 9, 20), s.find_subject("Бургеростроение", "-4"))[0]
+            row = s.day_rows(date(2026, 9, 20), must(s.find_subject("Бургеростроение", "-4")))[0]
             assert row.present
             assert row.student.full_name == "Примеров Пример"
 
@@ -307,8 +307,10 @@ class TestMigrationFromV1:
                 raw TEXT, UNIQUE(day, card_code));
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO meta VALUES('schema_version','1');
-            INSERT INTO students VALUES(1,'A10007002A','Иванов Иван','ИС-21','2026-09-20T09:00:00');
-            INSERT INTO attendance VALUES(1,'2026-09-20','2026-09-20T09:02:13','A10007002A',1,'raw');
+            INSERT INTO students VALUES(1,'A10007002A','Иванов Иван','ИС-21',
+                '2026-09-20T09:00:00');
+            INSERT INTO attendance VALUES(1,'2026-09-20','2026-09-20T09:02:13','A10007002A',
+                1,'raw');
             """
         )
         conn.commit()
@@ -326,7 +328,7 @@ class TestMigrationFromV1:
         path = tmp_path / "v1.db"
         self._make_v1(path)
         with Storage(path) as s:
-            legacy = s.find_subject(NO_SUBJECT)
+            legacy = must(s.find_subject(NO_SUBJECT))
             rows = s.day_rows(date(2026, 9, 20), legacy)
             assert rows[0].student.full_name == "Иванов Иван"
             assert rows[0].present
@@ -338,7 +340,7 @@ class TestMigrationFromV1:
             version = s.conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()[0]
-            assert version == str(__import__("rfid.storage", fromlist=["x"]).SCHEMA_VERSION)
+            assert version == str(__import__("rfid.db", fromlist=["x"]).SCHEMA_VERSION)
 
     def test_migration_is_idempotent(self, tmp_path):
         path = tmp_path / "v1.db"
@@ -372,10 +374,13 @@ class TestMigrationFromV2:
                 raw TEXT, UNIQUE(day, subject_id, card_code));
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO meta VALUES('schema_version','2');
-            INSERT INTO students VALUES(1,'A10007002A','Иванов  Иван','ИС-21','2026-09-20T09:00:00');
+            INSERT INTO students VALUES(1,'A10007002A','Иванов  Иван','ИС-21',
+                '2026-09-20T09:00:00');
             INSERT INTO subjects VALUES(1,'Матанализ','','2026-09-20T09:00:00');
-            INSERT INTO attendance VALUES(1,'2026-09-20','2026-09-20T09:02:13','A10007002A',1,1,'raw');
-            INSERT INTO attendance VALUES(2,'2026-09-20','2026-09-20T09:03:00','B20008002B',NULL,1,'raw');
+            INSERT INTO attendance VALUES(1,'2026-09-20','2026-09-20T09:02:13','A10007002A',
+                1,1,'raw');
+            INSERT INTO attendance VALUES(2,'2026-09-20','2026-09-20T09:03:00','B20008002B',
+                NULL,1,'raw');
             """
         )
         conn.commit()
@@ -386,9 +391,9 @@ class TestMigrationFromV2:
         self._make_v2(path)
         with Storage(path) as s:
             assert s.conn.execute("SELECT COUNT(*) FROM attendance").fetchone()[0] == 2
-            assert s.find_student(CARD_A).full_name == "Иванов  Иван"
+            assert must(s.find_student(CARD_A)).full_name == "Иванов  Иван"
             assert [u.card_code for u in s.unknown_cards()] == ["B20008002B"]
-            math = s.find_subject("Матанализ")
+            math = must(s.find_subject("Матанализ"))
             assert s.mark(CARD_A, math, at=NOON).status is MarkStatus.DUPLICATE
 
     def test_person_can_exist_without_card(self, tmp_path):

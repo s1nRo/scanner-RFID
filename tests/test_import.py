@@ -9,13 +9,13 @@ from datetime import date, datetime, time
 import pytest
 from openpyxl import load_workbook
 
-from rfid import journal, roster as R
-from rfid.codes import parse_line
-from rfid.storage import IMPORT_RAW, CardConflict, MarkStatus, Storage
-from test_roster import make_roster_file
+from rfid import excel, journal
+from rfid.cli import common
+from rfid.db import IMPORT_RAW, CardConflict, MarkStatus, Storage
+from tests.helpers import active, card, make_roster_file, open_sheet
 
-CARD_A = parse_line("Em-Marine[A100] 007,42")
-CARD_B = parse_line("Em-Marine[B200] 008,43")
+CARD_A = card("Em-Marine[A100] 007,42")
+CARD_B = card("Em-Marine[B200] 008,43")
 
 GROUP = "1000000/10001"
 NAMES = ["Тестов Тест Тестович", "Примеров Пример Примерович", "Образцова Проба"]
@@ -33,15 +33,15 @@ def folder(tmp_path):
     subject = tmp_path / "tables" / "Бургеростроение 1 курс"
     subject.mkdir(parents=True)
     make_roster_file(subject / "10001.xlsx", names=NAMES, group=GROUP)
-    return R.discover_subjects(tmp_path / "tables")[0]
+    return excel.discover_subjects(tmp_path / "tables")[0]
 
 
-def put(folder, cells: dict[tuple[int, int], object]) -> None:
+def put(folder, cells: dict[tuple[int, int], str | time | None]) -> None:
     """Вписать в файл группы значения, как это сделал бы человек в Excel."""
     path = folder.path / "10001.xlsx"
     book = load_workbook(path)
     for (row, col), value in cells.items():
-        book.active.cell(row=row, column=col, value=value)
+        active(book).cell(row=row, column=col, value=value)
     book.save(path)
 
 
@@ -60,38 +60,38 @@ class TestReadingCells:
         (" 10:00:00 ", time(10, 0)),
         (None, None),
         ("", None),
-        (R.ABSENT_MARK, None),
+        (excel.ABSENT_MARK, None),
         ("-", None),
         ("н", None),
     ])
     def test_values(self, value, expected):
-        assert R.cell_time(value) == expected
+        assert excel.cell_time(value) == expected
 
     @pytest.mark.parametrize("value", ["+", "был", "25:00", "10:75"])
     def test_unclear_is_not_guessed(self, value):
-        assert R.cell_time(value) == value.strip()
+        assert excel.cell_time(value) == value.strip()
 
 
 class TestHeaderDates:
     def test_our_format_gets_this_year(self):
-        assert R.header_date("12.09", TODAY) == date(2026, 9, 12)
+        assert excel.header_date("12.09", TODAY) == date(2026, 9, 12)
 
     def test_future_means_last_year(self):
         """«12.09», прочитанное в январе, — прошлый сентябрь, а не будущий."""
-        assert R.header_date("12.09", date(2027, 1, 15)) == date(2026, 9, 12)
+        assert excel.header_date("12.09", date(2027, 1, 15)) == date(2026, 9, 12)
 
     def test_full_date_and_excel_date(self):
-        assert R.header_date("12.09.2025", TODAY) == date(2025, 9, 12)
-        assert R.header_date(datetime(2026, 9, 12), TODAY) == date(2026, 9, 12)
+        assert excel.header_date("12.09.2025", TODAY) == date(2025, 9, 12)
+        assert excel.header_date(datetime(2026, 9, 12), TODAY) == date(2026, 9, 12)
 
     @pytest.mark.parametrize("value", ["Примечание", "31.02", None, 5])
     def test_not_a_date(self, value):
-        assert R.header_date(value, TODAY) is None
+        assert excel.header_date(value, TODAY) is None
 
 
 class TestImport:
     def test_marks_from_file_land_in_db(self, db, folder):
-        put(folder, {(2, 3): "12.09", (3, 3): time(10, 0), (4, 3): R.ABSENT_MARK})
+        put(folder, {(2, 3): "12.09", (3, 3): time(10, 0), (4, 3): excel.ABSENT_MARK})
         result = run(db, folder)
 
         assert result.added == 1
@@ -147,7 +147,7 @@ class TestImport:
         at = db.conn.execute("SELECT at FROM attendance").fetchone()["at"]
         assert at == "2026-09-12T09:02:13"
 
-    @pytest.mark.parametrize("cell", [None, R.ABSENT_MARK, "н"])
+    @pytest.mark.parametrize("cell", [None, excel.ABSENT_MARK, "н"])
     def test_absence_in_file_does_not_delete(self, db, folder, cell):
         """Прочерк мог поставить сам экспорт раньше прихода — по нему не удаляем."""
         subject = db.add_subject(folder.name)
@@ -191,10 +191,10 @@ class TestImport:
         run(db, folder)
         journal.fill_subject(db, db.find_subject(folder.name), folder)
 
-        sheet = load_workbook(folder.path / "10001.xlsx").active
+        sheet = open_sheet(folder.path / "10001.xlsx")
         assert sheet.cell(row=2, column=3).value == "12.09"
         assert sheet.cell(row=3, column=3).value == "10:00"
-        assert sheet.cell(row=4, column=3).value == R.ABSENT_MARK
+        assert sheet.cell(row=4, column=3).value == excel.ABSENT_MARK
 
     def test_unclear_cell_survives_export(self, db, folder):
         """«+» импорт не понял — значит и затирать его прочерком нельзя."""
@@ -202,9 +202,9 @@ class TestImport:
         run(db, folder)
         journal.fill_subject(db, db.find_subject(folder.name), folder)
 
-        sheet = load_workbook(folder.path / "10001.xlsx").active
+        sheet = open_sheet(folder.path / "10001.xlsx")
         assert sheet.cell(row=4, column=3).value == "+"
-        assert sheet.cell(row=5, column=3).value == R.ABSENT_MARK
+        assert sheet.cell(row=5, column=3).value == excel.ABSENT_MARK
 
     def test_hand_edit_after_import_survives_export(self, db, folder):
         """Запись в файл сперва забирает дописанное руками, потом пишет.
@@ -220,7 +220,7 @@ class TestImport:
         put(folder, {(4, 3): "10:07", (3, 3): "09:55"})
         journal.fill_subject(db, subject, folder)
 
-        sheet = load_workbook(folder.path / "10001.xlsx").active
+        sheet = open_sheet(folder.path / "10001.xlsx")
         assert sheet.cell(row=3, column=3).value == "10:00"
         assert sheet.cell(row=4, column=3).value == "10:07"
         assert db.conn.execute("SELECT COUNT(*) FROM attendance").fetchone()[0] == 2
@@ -242,7 +242,7 @@ class TestImport:
     def test_broken_file_does_not_block_others(self, db, folder):
         (folder.path / "битый.xlsx").write_bytes(b"not a workbook")
         put(folder, {(2, 3): "12.09", (3, 3): "10:00"})
-        folder = R.as_folder(folder.path)
+        folder = excel.as_folder(folder.path)
 
         results = journal.import_subject(db, folder, today=TODAY)
         assert sum(r.added for r in results) == 1
@@ -353,7 +353,7 @@ class TestFullSync:
 
     def test_dash_removes_mark(self, db, folder):
         self._scanned(db, folder, datetime(2026, 9, 12, 9, 2))
-        put(folder, {(2, 3): "12.09", (3, 3): R.ABSENT_MARK, (4, 3): "10:00"})
+        put(folder, {(2, 3): "12.09", (3, 3): excel.ABSENT_MARK, (4, 3): "10:00"})
         age_file(folder, datetime(2026, 9, 13, 12, 0))
 
         [result] = journal.import_subject(db, folder, TODAY, sync=True)
@@ -362,7 +362,7 @@ class TestFullSync:
 
     def test_mark_newer_than_file_is_kept(self, db, folder):
         """Прочерк поставил прошлый экспорт, а карту приложили позже — не удалять."""
-        put(folder, {(2, 3): "12.09", (3, 3): R.ABSENT_MARK})
+        put(folder, {(2, 3): "12.09", (3, 3): excel.ABSENT_MARK})
         age_file(folder, datetime(2026, 9, 12, 9, 0))
         self._scanned(db, folder, datetime(2026, 9, 12, 9, 40))
 
@@ -380,14 +380,14 @@ class TestFullSync:
     def test_days_absent_from_file_are_untouched(self, db, folder):
         """Колонки нет — таблица про этот день ничего не утверждает."""
         self._scanned(db, folder, datetime(2026, 9, 19, 9, 2))
-        put(folder, {(2, 3): "12.09", (3, 3): R.ABSENT_MARK})
+        put(folder, {(2, 3): "12.09", (3, 3): excel.ABSENT_MARK})
         age_file(folder, datetime(2026, 9, 20, 12, 0))
         journal.import_subject(db, folder, TODAY, sync=True)
         assert count(db) == 1
 
     def test_dry_run_changes_nothing(self, db, folder):
         self._scanned(db, folder, datetime(2026, 9, 12, 9, 2))
-        put(folder, {(2, 3): "12.09", (3, 3): R.ABSENT_MARK, (4, 3): "10:00"})
+        put(folder, {(2, 3): "12.09", (3, 3): excel.ABSENT_MARK, (4, 3): "10:00"})
         age_file(folder, datetime(2026, 9, 13, 12, 0))
         people = db.count_students()
 
@@ -404,7 +404,7 @@ class TestFullSync:
         imported, filled = journal.sync_subject(db, folder, TODAY)
         assert all(r.ok for r in imported + filled)
 
-        sheet = load_workbook(folder.path / "10001.xlsx").active
+        sheet = open_sheet(folder.path / "10001.xlsx")
         # День только из базы дописан в файл, дни из файла — в базе.
         assert sheet.cell(row=2, column=4).value == "19.09"
         assert sheet.cell(row=3, column=4).value == "09:02"
@@ -424,14 +424,14 @@ class TestSyncCommand:
             subject = s.add_subject(folder.name)
             s.add_student(CARD_A, NAMES[0], GROUP)
             s.mark(CARD_A, subject, at=datetime(2026, 9, 12, 9, 2))
-        put(folder, {(2, 3): "12.09", (3, 3): R.ABSENT_MARK})
+        put(folder, {(2, 3): "12.09", (3, 3): excel.ABSENT_MARK})
         age_file(folder, datetime(2026, 9, 13, 12, 0))
 
     def test_declining_changes_nothing(self, tmp_path, folder, monkeypatch):
         from rfid import cli
         self._prepare(tmp_path, folder)
         before = (folder.path / "10001.xlsx").read_bytes()
-        monkeypatch.setattr(cli, "_ask", lambda _p: "n")
+        monkeypatch.setattr(common, "ask", lambda _p: "n")
 
         cli.cmd_import(self._args(tmp_path))
         with Storage(tmp_path / "cli.db") as s:
@@ -441,7 +441,7 @@ class TestSyncCommand:
     def test_confirming_removes(self, tmp_path, folder, monkeypatch, capsys):
         from rfid import cli
         self._prepare(tmp_path, folder)
-        monkeypatch.setattr(cli, "_ask", lambda _p: "y")
+        monkeypatch.setattr(common, "ask", lambda _p: "y")
 
         assert cli.cmd_import(self._args(tmp_path)) == 0
         assert "Будут УДАЛЕНЫ" in capsys.readouterr().out
@@ -452,7 +452,7 @@ class TestSyncCommand:
         from rfid import cli
         self._prepare(tmp_path, folder)
         answers = iter(["1"])
-        monkeypatch.setattr(cli, "_ask", lambda _p: next(answers))
+        monkeypatch.setattr(common, "ask", lambda _p: next(answers))
 
         cli.cmd_import(self._args(tmp_path, sync=False, choose=True))
         with Storage(tmp_path / "cli.db") as s:

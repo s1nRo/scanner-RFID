@@ -5,8 +5,8 @@
 1. Debounce здесь, в памяти — гасит повторные срабатывания, если карту
    быстро провели дважды. Отвечает за то, чтобы экран не мигал одинаковыми
    строками. База при этом не трогается.
-2. UNIQUE(day, card_code) в SQLite — «уже отмечен сегодня». Гарантируется
-   базой, поэтому переживает перезапуск программы среди дня.
+2. UNIQUE(day, subject_id, card_code) в SQLite — «уже отмечен на этом
+   занятии». Гарантируется базой, поэтому переживает перезапуск программы.
 
 Считыватель шлёт одну строку на одно поднесение (проверено дампом), так что
 первый уровень нужен реже, чем казалось на этапе планирования, — но провести
@@ -17,9 +17,10 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Protocol
 
-from .readers import CardReader, Scan
-from .storage import MarkResult, MarkStatus, Storage, Subject
+from .db import MarkResult, MarkStatus, Storage, Subject
+from .scanner import CardReader
 
 DEFAULT_DEBOUNCE = 2.0
 
@@ -41,15 +42,11 @@ class Debounce:
         return previous is not None and now - previous < self.window
 
 
-class View:
-    """Минимальный интерфейс отображения (см. console.ConsoleView)."""
+class View(Protocol):
+    """Минимальный интерфейс отображения (консольный — cli.view.ConsoleView)."""
 
     def status(self, message: str) -> None: ...
     def show(self, result: MarkResult) -> None: ...
-
-
-def process(scan: Scan, storage: Storage, subject: Subject) -> MarkResult:
-    return storage.mark(scan.code, subject, at=scan.at, raw=scan.raw)
 
 
 def run(
@@ -75,7 +72,7 @@ def run(
             continue
 
         try:
-            result = process(scan, storage, subject)
+            result = storage.mark(scan.code, subject, at=scan.at, raw=scan.raw)
         except Exception as exc:
             # Эту отметку записать не вышло — сказать обязаны, она потеряна.
             tally[FAILED] += 1

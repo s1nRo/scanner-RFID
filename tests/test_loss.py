@@ -10,10 +10,10 @@ from datetime import datetime
 
 import pytest
 
-from rfid import pipeline
-from rfid.codes import parse_line
-from rfid.readers import MockCardReader
-from rfid.storage import Storage
+from rfid import excel, pipeline
+from rfid.db import Storage
+from rfid.scanner import MockCardReader
+from tests.helpers import card, open_sheet
 
 LINES = [
     "Em-Marine[A100] 007,42",
@@ -158,7 +158,7 @@ class TestMarkIsCommittedImmediately:
         path = tmp_path / "t.db"
         with Storage(path) as s:
             subject = s.add_subject("Тест")
-            s.mark(parse_line(LINES[0]), subject, at=datetime(2026, 9, 25, 9, 0))
+            s.mark(card(LINES[0]), subject, at=datetime(2026, 9, 25, 9, 0))
             # Соединение не закрываем: смотрим файл со стороны, как после сбоя.
             other = sqlite3.connect(path)
             try:
@@ -173,7 +173,7 @@ class TestExportSurvives:
 
     @staticmethod
     def _folder_with_bad_file(tmp_path):
-        from test_roster import make_roster_file
+        from tests.helpers import make_roster_file
 
         folder = tmp_path / "Предмет"
         folder.mkdir()
@@ -184,28 +184,27 @@ class TestExportSurvives:
         return folder
 
     def test_broken_file_does_not_block_the_others(self, tmp_path, db):
-        from openpyxl import load_workbook
-        from rfid import journal, roster as R
+        from rfid import journal
 
         folder = self._folder_with_bad_file(tmp_path)
         subject = db.add_subject("Предмет")
-        card = parse_line(LINES[0])
-        db.add_student(card, "Тестов Тест", "1000000/10001")
-        db.mark(card, subject, at=datetime(2026, 9, 25, 9, 0))
+        code = card(LINES[0])
+        db.add_student(code, "Тестов Тест", "1000000/10001")
+        db.mark(code, subject, at=datetime(2026, 9, 25, 9, 0))
 
-        results = journal.fill_subject(db, subject, R.discover_subjects(tmp_path)[0])
+        results = journal.fill_subject(db, subject, excel.discover_subjects(tmp_path)[0])
 
         good = [r for r in results if r.ok]
         assert len(good) == 1, "хорошая группа обязана быть заполнена"
-        sheet = load_workbook(folder / "3-хороший.xlsx").active
+        sheet = open_sheet(folder / "3-хороший.xlsx")
         assert sheet.cell(row=3, column=3).value == "09:00"
 
     def test_broken_files_are_reported(self, tmp_path, db):
-        from rfid import journal, roster as R
+        from rfid import journal
 
         self._folder_with_bad_file(tmp_path)
         subject = db.add_subject("Предмет")
-        results = journal.fill_subject(db, subject, R.discover_subjects(tmp_path)[0])
+        results = journal.fill_subject(db, subject, excel.discover_subjects(tmp_path)[0])
 
         broken = [r for r in results if not r.ok]
         assert len(broken) == 2, "про каждый сбойный файл надо сказать"
