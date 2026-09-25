@@ -56,6 +56,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM pip builds the package right here and leaves its scratch behind.
+REM Only what the build itself made is removed.
+if exist "build\lib\rfid" rmdir /s /q "build"
+if exist "src\rfid_attendance.egg-info" rmdir /s /q "src\rfid_attendance.egg-info"
+
 REM Working folders. Subject folders inside tables\ are yours to create.
 if not exist "data" mkdir "data"
 if not exist "tables" mkdir "tables"
