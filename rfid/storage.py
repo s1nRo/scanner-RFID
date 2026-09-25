@@ -20,23 +20,39 @@ from pathlib import Path
 
 from .codes import CardCode
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 NO_SUBJECT = "(без предмета)"
+
+# Пометка в attendance.raw у отметок, взятых из таблицы, а не с карты.
+IMPORT_RAW = "таблица: "
+
+# Что сделал import_mark с отметкой из таблицы.
+IMPORT_ADDED = "added"      # в базе не было — добавлена
+IMPORT_UPDATED = "updated"  # было другое время — взято из файла (синхронизация)
+IMPORT_KEPT = "kept"        # было другое время — оставлено из базы
+IMPORT_SAME = "same"        # совпадает, делать нечего
 
 # Сколько ждать, если база занята другим процессом, прежде чем сдаться.
 # Пара идёт полтора часа, очередь у считывателя живая — пять секунд
 # ожидания несопоставимы с потерянной отметкой.
 BUSY_TIMEOUT_MS = 5000
 
-_BASE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS students (
+# Имя таблицы подставляется: при переезде схемы данные копируются во временную
+# таблицу, которая потом занимает место старой. SQLite не умеет снимать
+# NOT NULL через ALTER, поэтому иначе никак.
+_STUDENTS_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
     id         INTEGER PRIMARY KEY,
-    card_code  TEXT    NOT NULL UNIQUE,
+    card_code  TEXT,
     full_name  TEXT    NOT NULL,
+    name_key   TEXT    NOT NULL,
     group_name TEXT    NOT NULL DEFAULT '',
     created_at TEXT    NOT NULL
-);
+)
+"""
+
+_BASE_SCHEMA = """
 
 CREATE TABLE IF NOT EXISTS subjects (
     id         INTEGER PRIMARY KEY,
@@ -59,7 +75,7 @@ CREATE TABLE IF NOT EXISTS {table} (
     id         INTEGER PRIMARY KEY,
     day        TEXT    NOT NULL,
     at         TEXT    NOT NULL,
-    card_code  TEXT    NOT NULL,
+    card_code  TEXT,
     student_id INTEGER REFERENCES students(id) ON DELETE SET NULL,
     subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     raw        TEXT,
@@ -72,6 +88,16 @@ CREATE INDEX IF NOT EXISTS idx_attendance_day ON attendance(day);
 CREATE INDEX IF NOT EXISTS idx_attendance_student ON attendance(student_id);
 CREATE INDEX IF NOT EXISTS idx_attendance_subject ON attendance(subject_id);
 CREATE INDEX IF NOT EXISTS idx_students_group ON students(group_name);
+
+-- Карта необязательна: студент может существовать без неё (например,
+-- втянутый из таблицы). Но если карта есть, она принадлежит одному человеку.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_students_card
+    ON students(card_code) WHERE card_code IS NOT NULL;
+
+-- Один человек — одна строка. Ключ нормализован (регистр, «ё», пробелы),
+-- иначе «Иванов» и «иванов» завелись бы дважды.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_students_person
+    ON students(name_key, group_name);
 """
 
 
@@ -84,7 +110,7 @@ class MarkStatus(Enum):
 @dataclass(frozen=True, slots=True)
 class Student:
     id: int
-    card_code: str
+    card_code: str | None   # None — человек есть, карты ещё нет
     full_name: str
     group_name: str
 
@@ -163,6 +189,38 @@ def _subject_id(subject: Subject | int) -> int:
     return subject.id if isinstance(subject, Subject) else subject
 
 
+class CardConflict(Exception):
+    """У человека уже есть другая карта."""
+
+    def __init__(self, student: "Student"):
+        super().__init__(
+            f"у студента {student.full_name} уже есть карта {student.card_code}"
+        )
+        self.student = student
+
+
+class _Transaction:
+    """Всё-или-ничего. На точках сохранения, поэтому вкладывается:
+    пробный прогон синхронизации оборачивает пофайловые транзакции в одну
+    внешнюю и откатывает её целиком."""
+
+    _depth = 0
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def __enter__(self) -> None:
+        _Transaction._depth += 1
+        self.name = f"sp{_Transaction._depth}"
+        self.conn.execute(f"SAVEPOINT {self.name}")
+
+    def __exit__(self, exc_type, *exc) -> None:
+        _Transaction._depth -= 1
+        if exc_type:
+            self.conn.execute(f"ROLLBACK TO {self.name}")
+        self.conn.execute(f"RELEASE {self.name}")
+
+
 class Storage:
     """Соединение с базой. Используется как контекстный менеджер."""
 
@@ -194,6 +252,8 @@ class Storage:
 
     def _migrate(self) -> None:
         self.conn.executescript(_BASE_SCHEMA)
+        self.conn.execute(_STUDENTS_DDL.format(table="students"))
+        self._migrate_students_to_v3()
 
         # Схема 1 — отметки без предмета. Переносим их в служебный предмет,
         # чтобы при обновлении ничего не потерялось.
@@ -210,6 +270,7 @@ class Storage:
             self.conn.execute("ALTER TABLE _attendance_v2 RENAME TO attendance")
 
         self.conn.execute(_ATTENDANCE_DDL.format(table="attendance"))
+        self._migrate_attendance_to_v3()
         self.conn.executescript(_INDEXES)
         self._repair_orphan_marks()
         # Пишем, только если версия и правда изменилась: иначе каждое открытие
@@ -223,6 +284,74 @@ class Storage:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (str(SCHEMA_VERSION),),
             )
+
+    def _migrate_students_to_v3(self) -> None:
+        """Схема 3: студент существует без карты.
+
+        Раньше `students` была таблицей привязок — человек попадал в базу
+        только вместе с картой. Чтобы втягивать отметки из таблиц, человек
+        должен существовать сам по себе, а карта стать необязательной.
+
+        SQLite не умеет снимать NOT NULL через ALTER, поэтому таблица
+        пересобирается. Ключ ФИО считается в Python: нормализация с «ё»
+        и регистром средствами SQL не выражается.
+        """
+        if self._column_exists("students", "name_key"):
+            return
+
+        from .roster import normalize_name
+
+        rows = self.conn.execute(
+            "SELECT id, card_code, full_name, group_name, created_at FROM students"
+        ).fetchall()
+
+        # Внешние ключи мешают подменить таблицу, на которую ссылается attendance.
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.conn.execute("DROP TABLE IF EXISTS _students_v3")
+            self.conn.execute(_STUDENTS_DDL.format(table="_students_v3"))
+            self.conn.executemany(
+                "INSERT INTO _students_v3(id, card_code, full_name, name_key, "
+                "group_name, created_at) VALUES(?, ?, ?, ?, ?, ?)",
+                [
+                    (r["id"], r["card_code"], r["full_name"],
+                     normalize_name(r["full_name"]), r["group_name"], r["created_at"])
+                    for r in rows
+                ],
+            )
+            self.conn.execute("DROP TABLE students")
+            self.conn.execute("ALTER TABLE _students_v3 RENAME TO students")
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
+
+    def _migrate_attendance_to_v3(self) -> None:
+        """Схема 3: у отметки может не быть карты.
+
+        Отметки, втянутые из таблицы, приходят от человека, а не от карты.
+        Раньше card_code был обязателен, и записать такую отметку было некуда.
+        """
+        if not self._column_not_null("attendance", "card_code"):
+            return
+
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.conn.execute("DROP TABLE IF EXISTS _attendance_v3")
+            self.conn.execute(_ATTENDANCE_DDL.format(table="_attendance_v3"))
+            self.conn.execute(
+                "INSERT INTO _attendance_v3(id, day, at, card_code, student_id, "
+                "subject_id, raw) SELECT id, day, at, card_code, student_id, "
+                "subject_id, raw FROM attendance"
+            )
+            self.conn.execute("DROP TABLE attendance")
+            self.conn.execute("ALTER TABLE _attendance_v3 RENAME TO attendance")
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
+
+    def _column_not_null(self, table: str, column: str) -> bool:
+        for row in self.conn.execute(f"PRAGMA table_info({table})"):
+            if row["name"] == column:
+                return bool(row["notnull"])
+        return False
 
     def _repair_orphan_marks(self) -> int:
         """Отдать безымянные отметки студентам, чьи карты уже известны.
@@ -353,35 +482,174 @@ class Storage:
         return student
 
     def _insert_student(
-        self, code: CardCode | str, full_name: str, group_name: str = ""
+        self, code: CardCode | str | None, full_name: str, group_name: str = ""
     ) -> Student:
+        """Завести человека. Карта необязательна — её может ещё не быть."""
+        from .roster import normalize_name
+
         canonical = code.canonical if isinstance(code, CardCode) else code
         full_name = full_name.strip()
+        group_name = group_name.strip()
         if not full_name:
             raise ValueError("ФИО не может быть пустым")
+
+        # Человек мог уже появиться в базе без карты — тогда не плодим вторую
+        # строку, а привязываем карту к существующей.
+        existing = self.student_by_name(full_name, group_name)
+        if existing is not None:
+            if canonical and existing.card_code not in (None, canonical):
+                # Молча вернуть старую запись нельзя: оператор увидел бы
+                # «привязано», а новая карта осталась бы ничьей.
+                raise CardConflict(existing)
+            if canonical and existing.card_code is None:
+                self.conn.execute(
+                    "UPDATE students SET card_code = ? WHERE id = ?",
+                    (canonical, existing.id),
+                )
+                student = Student(existing.id, canonical, existing.full_name, group_name)
+                self._stamp_card_on_marks(student)
+                return student
+            return existing
+
         cur = self.conn.execute(
-            "INSERT INTO students(card_code, full_name, group_name, created_at) "
-            "VALUES(?, ?, ?, ?)",
-            (canonical, full_name, group_name.strip(),
+            "INSERT INTO students(card_code, full_name, name_key, group_name, created_at) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (canonical, full_name, normalize_name(full_name), group_name,
              datetime.now().isoformat(timespec="seconds")),
         )
-        return Student(cur.lastrowid, canonical, full_name, group_name.strip())
+        return Student(cur.lastrowid, canonical, full_name, group_name)
+
+    def student_by_name(self, full_name: str, group_name: str = "") -> Student | None:
+        """Найти человека по ФИО и группе, без учёта регистра и «ё»."""
+        from .roster import normalize_name
+
+        row = self.conn.execute(
+            "SELECT * FROM students WHERE name_key = ? AND group_name = ?",
+            (normalize_name(full_name), group_name.strip()),
+        ).fetchone()
+        return _as_student(row) if row else None
+
+    def get_or_create_student(self, full_name: str, group_name: str = "") -> Student:
+        """Человек из списка группы. Карты у него может не быть вовсе."""
+        return self.student_by_name(full_name, group_name) or self._insert_student(
+            None, full_name, group_name
+        )
 
     def _attach_past_marks(self, student: Student) -> int:
         """Сделать именными все прошлые отметки карты этого студента."""
+        if student.card_code is None:
+            return 0
         cur = self.conn.execute(
             "UPDATE attendance SET student_id = ? WHERE card_code = ? AND student_id IS NULL",
             (student.id, student.card_code),
         )
         return cur.rowcount
 
-    def list_students(self, group_name: str | None = None) -> list[Student]:
+    def _stamp_card_on_marks(self, student: Student) -> None:
+        """Проставить карту в отметках, сделанных, пока карты не было.
+
+        Отметки из таблицы пишутся без карты, и UNIQUE(day, subject_id,
+        card_code) их не видит: NULL в SQLite ни с чем не совпадает. Если
+        оставить их так, то после привязки то же занятие отметилось бы
+        второй раз и прикладывание не сказало бы «уже отмечен».
+
+        Где за то же занятие уже есть отметка картой, главнее она — это
+        живой приход, а безкарточная строка просто лишняя.
+        """
+        self.conn.execute(
+            "DELETE FROM attendance AS a "
+            "WHERE a.student_id = ? AND a.card_code IS NULL AND EXISTS ("
+            "  SELECT 1 FROM attendance b WHERE b.card_code = ? "
+            "  AND b.day = a.day AND b.subject_id = a.subject_id)",
+            (student.id, student.card_code),
+        )
+        self.conn.execute(
+            "UPDATE attendance SET card_code = ? WHERE student_id = ? AND card_code IS NULL",
+            (student.card_code, student.id),
+        )
+
+    def has_mark(self, student: Student, subject: Subject | int, day: date) -> bool:
+        """Есть ли у человека отметка на этом предмете в этот день."""
+        row = self.conn.execute(
+            "SELECT 1 FROM attendance WHERE day = ? AND subject_id = ? "
+            "AND (student_id = ? OR card_code = ?)",
+            (day.isoformat(), _subject_id(subject), student.id, student.card_code),
+        ).fetchone()
+        return row is not None
+
+    def import_mark(
+        self,
+        student: Student,
+        subject: Subject | int,
+        at: datetime,
+        *,
+        raw: str = "",
+        file_wins: bool = False,
+    ) -> str:
+        """Отметка, взятая из таблицы. Возвращает один из IMPORT_*.
+
+        Обычно главнее база: другое время в файле её не меняет (IMPORT_KEPT).
+        С file_wins — полная синхронизация — правится база.
+        Сравнение до минуты: в файле секунд нет, а у прихода картой есть,
+        и без этого каждая живая отметка считалась бы расхождением.
+        """
+        row = self.conn.execute(
+            "SELECT id, at FROM attendance WHERE day = ? AND subject_id = ? "
+            "AND (student_id = ? OR card_code = ?) ORDER BY at LIMIT 1",
+            (at.date().isoformat(), _subject_id(subject), student.id, student.card_code),
+        ).fetchone()
+        if row is not None:
+            if datetime.fromisoformat(row["at"]).replace(second=0) == at.replace(second=0):
+                return IMPORT_SAME
+            if not file_wins:
+                return IMPORT_KEPT
+            self.conn.execute(
+                "UPDATE attendance SET at = ? WHERE id = ?",
+                (at.isoformat(timespec="seconds"), row["id"]),
+            )
+            return IMPORT_UPDATED
+        cur = self.conn.execute(
+            "INSERT INTO attendance(day, at, card_code, student_id, subject_id, raw) "
+            "VALUES(?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(day, subject_id, card_code) DO NOTHING",
+            (at.date().isoformat(), at.isoformat(timespec="seconds"), student.card_code,
+             student.id, _subject_id(subject), raw),
+        )
+        return IMPORT_ADDED if cur.rowcount else IMPORT_SAME
+
+    def marks_of(
+        self, student: Student, subject: Subject | int, day: date
+    ) -> list[tuple[int, datetime]]:
+        """Отметки человека на предмете за день: (id строки, время)."""
+        rows = self.conn.execute(
+            "SELECT id, at FROM attendance WHERE day = ? AND subject_id = ? "
+            "AND (student_id = ? OR card_code = ?) ORDER BY at",
+            (day.isoformat(), _subject_id(subject), student.id, student.card_code),
+        )
+        return [(r["id"], datetime.fromisoformat(r["at"])) for r in rows]
+
+    def delete_marks(self, ids: list[int]) -> int:
+        cur = self.conn.executemany("DELETE FROM attendance WHERE id = ?", [(i,) for i in ids])
+        return cur.rowcount
+
+    def transaction(self):
+        """Одна транзакция на много записей: быстрее и всё-или-ничего."""
+        return _Transaction(self.conn)
+
+    def list_students(
+        self, group_name: str | None = None, *, with_card: bool = False
+    ) -> list[Student]:
         # None — без фильтра; "" — именно те, у кого группа не указана.
-        sql = "SELECT * FROM students"
-        params: tuple = ()
+        where: list[str] = []
+        params: list = []
         if group_name is not None:
-            sql += " WHERE group_name = ?"
-            params = (group_name,)
+            where.append("group_name = ?")
+            params.append(group_name)
+        if with_card:
+            where.append("card_code IS NOT NULL")
+        sql = "SELECT * FROM students"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY group_name, full_name"
         return [_as_student(r) for r in self.conn.execute(sql, params)]
 
@@ -392,9 +660,42 @@ class Storage:
         return [r["group_name"] for r in rows]
 
     def remove_student(self, code: CardCode | str) -> bool:
-        canonical = code.canonical if isinstance(code, CardCode) else code
-        cur = self.conn.execute("DELETE FROM students WHERE card_code = ?", (canonical,))
-        return cur.rowcount > 0
+        """Снять привязку карты. Человек и его отметки из таблиц остаются.
+
+        Удалять саму запись нельзя: отметки, втянутые из таблиц, держатся
+        только за человека, и после удаления стали бы ничьими и невидимыми.
+        Отметки же, сделанные картой, возвращаются в «неизвестные» —
+        привязка могла быть ошибочной, и их надо суметь отдать другому.
+        """
+        student = self.find_student(code)
+        if student is None:
+            return False
+        self._unbind(f"id = {int(student.id)}")
+        return True
+
+    def unbind_all_cards(self) -> None:
+        """Снять все привязки карт, не трогая людей и отметки из таблиц."""
+        self._unbind("card_code IS NOT NULL")
+
+    def _unbind(self, which: str) -> None:
+        with self.transaction():
+            people = f"SELECT id FROM students WHERE {which}"
+            # Отметки из таблиц остаются за человеком: их связь — ФИО, не карта.
+            self.conn.execute(
+                f"UPDATE attendance SET card_code = NULL "
+                f"WHERE student_id IN ({people}) AND raw LIKE '{IMPORT_RAW}%'"
+            )
+            self.conn.execute(
+                f"UPDATE attendance SET student_id = NULL "
+                f"WHERE student_id IN ({people}) AND card_code IS NOT NULL"
+            )
+            self.conn.execute(f"UPDATE students SET card_code = NULL WHERE {which}")
+
+    def count_cards(self) -> int:
+        """Сколько карт привязано."""
+        return self.conn.execute(
+            "SELECT COUNT(*) AS n FROM students WHERE card_code IS NOT NULL"
+        ).fetchone()["n"]
 
     # --------------------------------------------------------- неизвестные карты
 

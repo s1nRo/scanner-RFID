@@ -9,6 +9,7 @@
     python -m rfid unknown ...      неизвестные карты
     python -m rfid report           кто пришёл, кого нет
     python -m rfid export           проставить отметки в файлах групп
+    python -m rfid import [--sync]  обновить базу из файлов групп
     python -m rfid doctor           проверка железа, драйвера и базы
     python -m rfid ports            какие COM-порты есть
 
@@ -38,7 +39,7 @@ from .readers import (
     make_reader,
     no_port_explanation,
 )
-from .storage import Storage, Subject
+from .storage import CardConflict, Storage, Subject
 
 DEFAULT_DB = Path("data/attendance.db")
 TABLES_DIR = Path("tables")
@@ -87,6 +88,16 @@ def _ask(prompt: str) -> str:
         return input(prompt).strip()
     except EOFError:
         raise Interrupted(_NO_INPUT_HINT)
+
+
+def _confirm(question: str) -> bool:
+    """Вопрос «да или нет». Согласие — только y, всё остальное — отказ.
+
+    Отказ по умолчанию нарочно: подтверждают удаление. В русской раскладке
+    клавиша y даёт «н» — пусть это лучше будет отказом, чем случайным
+    согласием у того, кто начал печатать «нет».
+    """
+    return _ask(f"{question} (y/n): ").lower() in ("y", "yes")
 
 
 class Interrupted(Exception):
@@ -243,7 +254,7 @@ def _norm(name: str) -> str:
 
 def _print_candidates(candidates: list[Candidate], storage: Storage) -> None:
     """Список с подписями групп, но сквозной нумерацией."""
-    known = {_norm(s.full_name) for s in storage.list_students()}
+    known = {_norm(s.full_name) for s in storage.list_students(with_card=True)}
     group = None
     print()
     for item in candidates:
@@ -262,7 +273,7 @@ def _by_number(candidates: list[Candidate], choice: str) -> Candidate | None:
 
 
 def _bound_count(candidates: list[Candidate], storage: Storage) -> int:
-    known = {_norm(s.full_name) for s in storage.list_students()}
+    known = {_norm(s.full_name) for s in storage.list_students(with_card=True)}
     return sum(1 for c in candidates if _norm(c.full_name) in known)
 
 
@@ -329,9 +340,15 @@ def cmd_enroll(args) -> int:
                 if chosen is None:
                     print("  пропущено" if not choice else "  нет такого номера")
                 else:
-                    saved, credited = storage.resolve_unknown(
-                        code, chosen.full_name, chosen.group_name
-                    )
+                    try:
+                        saved, credited = storage.resolve_unknown(
+                            code, chosen.full_name, chosen.group_name
+                        )
+                    except CardConflict as exc:
+                        print(f"  Не привязано: {exc}. Сначала снимите старую: "
+                              f"rfid students remove {exc.student.card_code}")
+                        print("\n  Приложите карту следующего студента…")
+                        continue
                     added += 1
                     print(f"  Привязано: {saved.full_name} ({saved.group_name})")
                     if credited:
@@ -466,10 +483,11 @@ MENU = [
     ("5", "Предметы и группы", "subjects"),
     ("6", "Кому какая карта принадлежит", "students-list"),
     ("7", "Заполнить файлы групп", "export"),
-    ("8", "Проверить оборудование", "doctor"),
+    ("8", "Обновить базу из файлов групп", "import"),
+    ("9", "Проверить оборудование", "doctor"),
 ]
 
-_MENU_ARGV = {"students-list": ["students", "list"]}
+_MENU_ARGV = {"students-list": ["students", "list"], "import": ["import", "--choose"]}
 
 
 _EXIT_WORDS = ("0", "q", "й", "выход", "exit", "quit")
@@ -580,7 +598,7 @@ def cmd_doctor(args) -> int:
     db_path = Path(args.db)
     if db_path.exists():
         with Storage(db_path) as storage:
-            print(f"[ OK ] база: {db_path}  карт привязано: {storage.count_students()}")
+            print(f"[ OK ] база: {db_path}  карт привязано: {storage.count_cards()}")
             unknown = storage.unknown_cards()
             if unknown:
                 print(f"[ ?? ] непривязанных карт: {len(unknown)} — см. rfid unknown list")
@@ -631,7 +649,7 @@ def cmd_subjects(args) -> int:
 def cmd_students(args) -> int:
     with Storage(args.db) as storage:
         if args.students_action == "list":
-            students = storage.list_students()
+            students = storage.list_students(with_card=True)
             if not students:
                 print("Ни одна карта ещё не привязана.")
                 return 0
@@ -714,7 +732,7 @@ def cmd_reset(args) -> int:
     with Storage(args.db) as storage:
         marks = storage.conn.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
         subjects = len(storage.list_subjects())
-        cards = storage.count_students()
+        cards = storage.count_cards()
 
         what = args.reset_what
         plan = []
@@ -730,7 +748,7 @@ def cmd_reset(args) -> int:
         print("\nФайлы групп в tables/ не трогаются.")
 
         if not args.yes:
-            if _ask("\nПродолжить? (да / нет): ").lower() not in ("да", "д", "yes", "y"):
+            if not _confirm("\nПродолжить?"):
                 print("Отменено.")
                 return 0
 
@@ -739,13 +757,16 @@ def cmd_reset(args) -> int:
             # как якорь для журнала, а сам список предметов — это папки.
             storage.conn.execute("DELETE FROM attendance")
             storage.conn.execute("DELETE FROM subjects")
-        if what in ("cards", "all"):
+        if what == "all":
             storage.conn.execute("DELETE FROM students")
+        elif what == "cards":
+            # Люди остаются: за ними могут числиться отметки из таблиц.
+            storage.unbind_all_cards()
 
         print("\nГотово. Сейчас в базе:")
         print(f"   отметок: {storage.conn.execute('SELECT COUNT(*) FROM attendance').fetchone()[0]}")
         print(f"   предметов: {len(storage.list_subjects())}")
-        print(f"   привязок карт: {storage.count_students()}")
+        print(f"   привязок карт: {storage.count_cards()}")
     return 0
 
 
@@ -756,7 +777,11 @@ def cmd_export(args) -> int:
     if not filled:
         print("Заполнять нечего: нет предметов с отметками.")
         return 0
+    return 1 if _print_fill(filled) else 0
 
+
+def _print_fill(filled: dict[str, list[journal.FillResult]]) -> int:
+    """Показать итог записи в файлы. Возвращает число файлов с ошибкой."""
     problems = 0
     for subject_name, results in filled.items():
         print(f"\n{subject_name}")
@@ -769,7 +794,108 @@ def cmd_export(args) -> int:
             else:
                 problems += 1
                 print(f"   {result.path.name}: {result.error}")
+    return problems
+
+
+def cmd_import(args) -> int:
+    """Обновить базу из файлов групп.
+
+    Обычно — добавить недостающее, главнее база. --sync — полная
+    синхронизация, главнее таблицы: сперва пробный прогон и список того,
+    что будет удалено, потом подтверждение, и только тогда запись.
+    """
+    if args.subject:
+        folders = [_subject_by_name(args.subject, args.tables)]
+    else:
+        folders = R.discover_subjects(args.tables)
+    if not folders:
+        print(_nothing_found(args.tables))
+        return 1
+
+    sync = args.sync or (args.choose and _choose_import_mode())
+
+    with Storage(args.db) as storage:
+        if not sync:
+            results = {f.name: journal.import_subject(storage, f) for f in folders}
+            problems = _print_import(results)
+            added = sum(r.added for rs in results.values() for r in rs)
+            conflicts = sum(r.conflicts for rs in results.values() for r in rs)
+            print(f"\nДобавлено в базу: {added}.")
+            if conflicts:
+                print(f"Время расходится с базой: {conflicts} — оставлено как в базе. "
+                      "Взять из таблиц: полная синхронизация.")
+            return 1 if problems else 0
+
+        plan = {f.name: journal.import_subject(storage, f, sync=True, dry_run=True)
+                for f in folders}
+        print("\nПолная синхронизация — главнее таблицы. Что изменится в базе:")
+        _print_import(plan)
+        removals = [(r.group_name, rm) for rs in plan.values() for r in rs for rm in r.removed]
+        if removals:
+            print("\nБудут УДАЛЕНЫ отметки, против которых в таблице прочерк или пусто:")
+            for group, rm in removals:
+                print(f"   {rm.day.strftime('%d.%m')} {rm.at.strftime('%H:%M')}  "
+                      f"{rm.full_name}  ({group})")
+        if not args.yes:
+            if not _confirm("\nВыполнить синхронизацию?"):
+                print("Отменено, база не изменилась.")
+                return 0
+
+        problems = 0
+        for folder in folders:
+            imported, filled = journal.sync_subject(storage, folder)
+            problems += sum(1 for r in imported if not r.ok)
+            problems += _print_fill({folder.name: filled})
+    print("\nГотово: база и файлы групп совпадают." if not problems
+          else "\nГотово, но не со всеми файлами — см. выше.")
     return 1 if problems else 0
+
+
+def _choose_import_mode() -> bool:
+    """Спросить режим обновления. True — полная синхронизация."""
+    print()
+    print("  Как обновить базу:")
+    print("    1. Добавить недостающее — главнее база")
+    print("       берутся отметки из таблиц, которых в базе нет;")
+    print("       если время расходится, остаётся как в базе")
+    print("    2. Полная синхронизация — главнее таблицы")
+    print("       время берётся из таблиц, отметки против прочерков удаляются,")
+    print("       затем файлы переписываются из базы; перед удалением спросит")
+    print("    0. назад")
+    choice = _ask("\n  Выберите номер: ")
+    if choice in ("0", "", "q"):
+        raise Cancelled
+    if choice not in ("1", "2"):
+        raise Interrupted("  Нет такого пункта.")
+    return choice == "2"
+
+
+def _print_import(results: dict[str, list[journal.ImportResult]]) -> int:
+    """Показать итог импорта по файлам. Возвращает число файлов с ошибкой."""
+    problems = 0
+    for subject_name, items in results.items():
+        print(f"\n{subject_name}")
+        for result in items:
+            if not result.ok:
+                problems += 1
+                print(f"   {result.path.name}: {result.error}")
+                continue
+            parts = [f"новых {result.added}"]
+            if result.updated:
+                parts.append(f"время из таблицы {result.updated}")
+            if result.conflicts:
+                parts.append(f"расходится, оставлено из базы {result.conflicts}")
+            if result.removed:
+                parts.append(f"удалить {len(result.removed)}")
+            parts.append(f"без изменений {result.same}")
+            days = ", ".join(d.strftime("%d.%m") for d in result.dates) or "дат нет"
+            print(f"   {result.path.name}  ({result.group_name}): "
+                  f"{', '.join(parts)}  [{days}]")
+            if result.newer:
+                print(f"      сделаны позже сохранения файла, не трогаются: {result.newer}")
+            for where, value in result.skipped:
+                print(f"      не понял ячейку «{value}» ({where}) — оставлена как есть")
+    return problems
 
 
 # --------------------------------------------------------------------- разбор
@@ -831,6 +957,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     export_cmd = subparsers.add_parser("export", help="проставить отметки в файлах групп")
     export_cmd.set_defaults(func=cmd_export)
+
+    import_cmd = subparsers.add_parser(
+        "import", help="обновить базу из файлов групп (по умолчанию главнее база)"
+    )
+    import_cmd.add_argument("--subject", help="только эта папка-предмет")
+    import_cmd.add_argument(
+        "--sync", action="store_true",
+        help="полная синхронизация: главнее таблицы, затем файлы переписываются из базы",
+    )
+    import_cmd.add_argument("--yes", action="store_true", help="без подтверждения")
+    # Для меню: спросить режим, а не брать обычный молча.
+    import_cmd.add_argument("--choose", action="store_true", help=argparse.SUPPRESS)
+    import_cmd.set_defaults(func=cmd_import)
 
     reset = subparsers.add_parser("reset", help="очистить базу (файлы групп не трогает)")
     reset.add_argument("reset_what", choices=("marks", "cards", "all"),

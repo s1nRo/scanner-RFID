@@ -39,7 +39,7 @@ def counts(path):
         return (
             s.conn.execute("SELECT COUNT(*) FROM attendance").fetchone()[0],
             len(s.list_subjects()),
-            s.count_students(),
+            s.count_cards(),
         )
 
 
@@ -59,12 +59,12 @@ class TestReset:
         assert counts(filled) == (0, 0, 0)
 
     def test_declining_changes_nothing(self, filled, monkeypatch):
-        monkeypatch.setattr(cli, "_ask", lambda _p: "нет")
+        monkeypatch.setattr(cli, "_ask", lambda _p: "n")
         cli.cmd_reset(ResetArgs(filled, "all", yes=False))
         assert counts(filled) == (1, 1, 1)
 
     def test_confirming_proceeds(self, filled, monkeypatch):
-        monkeypatch.setattr(cli, "_ask", lambda _p: "да")
+        monkeypatch.setattr(cli, "_ask", lambda _p: "y")
         cli.cmd_reset(ResetArgs(filled, "all", yes=False))
         assert counts(filled) == (0, 0, 0)
 
@@ -81,3 +81,24 @@ class TestReset:
             pass
         cli.cmd_reset(ResetArgs(path, "all"))
         assert counts(path) == (0, 0, 0)
+
+
+class TestConfirm:
+    """Согласие — только y. Всё прочее, включая «да», — отказ."""
+
+    @pytest.mark.parametrize("answer", ["y", "Y", "yes"])
+    def test_yes(self, monkeypatch, answer):
+        monkeypatch.setattr(cli, "_ask", lambda _p: answer)
+        assert cli._confirm("Удалить?") is True
+
+    @pytest.mark.parametrize("answer", ["n", "N", "", "да", "н", "нет", "no"])
+    def test_everything_else_is_no(self, monkeypatch, answer):
+        # «н» — это y в русской раскладке; случайное согласие хуже отказа.
+        monkeypatch.setattr(cli, "_ask", lambda _p: answer)
+        assert cli._confirm("Удалить?") is False
+
+    def test_prompt_shows_y_n(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(cli, "_ask", lambda p: seen.append(p) or "n")
+        cli._confirm("Удалить?")
+        assert seen == ["Удалить? (y/n): "]

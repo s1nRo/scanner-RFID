@@ -28,7 +28,7 @@ import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -291,6 +291,10 @@ def write_attendance(
                         and merged.min_col <= column <= merged.max_col):
                     sheet.unmerge_cells(str(merged))
             cell = sheet.cell(row=student.row, column=column)
+            if at is None and cell_time(cell.value) is not None:
+                # В файле что-то стоит, а в базе отметки нет: время, вписанное
+                # руками, или непонятное «+». Файл главнее — не затираем.
+                continue
             cell.value = at.strftime("%H:%M") if at else absent_mark
             cell.alignment = Alignment(horizontal="center")
             if at is not None and is_late(at, starts):
@@ -324,6 +328,98 @@ def _save_atomically(workbook, path: Path) -> None:
         except OSError:
             pass
         raise
+
+
+# ------------------------------------------------------ чтение отметок из файла
+
+_TIME_RE = re.compile(r"^(?P<h>\d{1,2})[:.](?P<m>\d{2})(?::\d{2})?$")
+_DAY_RE = re.compile(r"^(?P<d>\d{1,2})\.(?P<m>\d{1,2})(?:\.(?P<y>\d{2}|\d{4}))?$")
+
+
+@dataclass(frozen=True, slots=True)
+class FileMarks:
+    """Отметки, найденные в файле группы."""
+
+    # дата -> [(студент, время прихода)]
+    marks: dict[date, list[tuple[RosterStudent, datetime]]]
+    # Что не удалось понять: (заголовок колонки или ФИО, значение).
+    # Такое не угадываем, а показываем человеку.
+    skipped: list[tuple[str, str]]
+    # дата -> кто в этот день явно не был (пусто или прочерк)
+    absent: dict[date, list[RosterStudent]] = field(default_factory=dict)
+
+
+def header_date(value, today: date) -> date | None:
+    """Дата из заголовка колонки.
+
+    Мы пишем «дд.мм» без года. Год восстанавливается так, чтобы дата
+    не оказалась в будущем: «12.09», прочитанное в январе, — прошлый сентябрь.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    match = _DAY_RE.match(value.strip())
+    if not match:
+        return None
+    day, month = int(match["d"]), int(match["m"])
+    year = match["y"]
+    try:
+        if year:
+            return date(int(year) + (2000 if len(year) == 2 else 0), month, day)
+        guess = date(today.year, month, day)
+        return guess if guess <= today else date(today.year - 1, month, day)
+    except ValueError:
+        return None
+
+
+def cell_time(value) -> time | None | str:
+    """Время прихода из ячейки.
+
+    time — пришёл; None — пусто или прочерк, то есть не был; строка —
+    непонятное значение, которое нельзя молча принять ни за приход,
+    ни за пропуск.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.time().replace(second=0, microsecond=0)
+    if isinstance(value, time):
+        return value.replace(second=0, microsecond=0)
+    text = str(value).strip()
+    if not text or text in {ABSENT_MARK, "-", "–", "н", "Н", "нб", "НБ"}:
+        return None
+    match = _TIME_RE.match(text)
+    if match and int(match["h"]) < 24 and int(match["m"]) < 60:
+        return time(int(match["h"]), int(match["m"]))
+    return text
+
+
+def read_attendance(roster: Roster, today: date | None = None) -> FileMarks:
+    """Прочитать уже проставленные в файле отметки."""
+    today = today or date.today()
+    sheet = load_workbook(roster.path)[roster.sheet_title]
+
+    marks: dict[date, list[tuple[RosterStudent, datetime]]] = {}
+    absent: dict[date, list[RosterStudent]] = {}
+    skipped: list[tuple[str, str]] = []
+    for col in range(roster.first_date_col, sheet.max_column + 1):
+        head = sheet.cell(row=roster.header_row, column=col).value
+        day = header_date(head, today)
+        if day is None:
+            continue  # не дата — чужая колонка, например «Примечание»
+        for student in roster.students:
+            value = cell_time(sheet.cell(row=student.row, column=col).value)
+            if value is None:
+                absent.setdefault(day, []).append(student)
+                continue
+            if isinstance(value, str):
+                skipped.append((f"{head}, {student.full_name}", value))
+                continue
+            marks.setdefault(day, []).append((student, datetime.combine(day, value)))
+    return FileMarks(marks, skipped, absent)
 
 
 def unmatched_names(roster: Roster, names: list[str]) -> list[str]:

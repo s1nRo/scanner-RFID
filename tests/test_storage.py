@@ -338,7 +338,7 @@ class TestMigrationFromV1:
             version = s.conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()[0]
-            assert version == "2"
+            assert version == str(__import__("rfid.storage", fromlist=["x"]).SCHEMA_VERSION)
 
     def test_migration_is_idempotent(self, tmp_path):
         path = tmp_path / "v1.db"
@@ -347,3 +347,65 @@ class TestMigrationFromV1:
             with Storage(path) as s:
                 assert s.conn.execute("SELECT COUNT(*) FROM attendance").fetchone()[0] == 1
                 assert len(s.list_subjects()) == 1
+
+
+class TestMigrationFromV2:
+    """Схема 2 держала человека только вместе с картой. Схема 3 это развязывает."""
+
+    def _make_v2(self, path):
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE students (
+                id INTEGER PRIMARY KEY, card_code TEXT NOT NULL UNIQUE,
+                full_name TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL);
+            CREATE TABLE subjects (
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                course TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                UNIQUE(name, course));
+            CREATE TABLE attendance (
+                id INTEGER PRIMARY KEY, day TEXT NOT NULL, at TEXT NOT NULL,
+                card_code TEXT NOT NULL,
+                student_id INTEGER REFERENCES students(id) ON DELETE SET NULL,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+                raw TEXT, UNIQUE(day, subject_id, card_code));
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta VALUES('schema_version','2');
+            INSERT INTO students VALUES(1,'A10007002A','Иванов  Иван','ИС-21','2026-09-20T09:00:00');
+            INSERT INTO subjects VALUES(1,'Матанализ','','2026-09-20T09:00:00');
+            INSERT INTO attendance VALUES(1,'2026-09-20','2026-09-20T09:02:13','A10007002A',1,1,'raw');
+            INSERT INTO attendance VALUES(2,'2026-09-20','2026-09-20T09:03:00','B20008002B',NULL,1,'raw');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_nothing_lost(self, tmp_path):
+        path = tmp_path / "v2.db"
+        self._make_v2(path)
+        with Storage(path) as s:
+            assert s.conn.execute("SELECT COUNT(*) FROM attendance").fetchone()[0] == 2
+            assert s.find_student(CARD_A).full_name == "Иванов  Иван"
+            assert [u.card_code for u in s.unknown_cards()] == ["B20008002B"]
+            math = s.find_subject("Матанализ")
+            assert s.mark(CARD_A, math, at=NOON).status is MarkStatus.DUPLICATE
+
+    def test_person_can_exist_without_card(self, tmp_path):
+        path = tmp_path / "v2.db"
+        self._make_v2(path)
+        with Storage(path) as s:
+            # Ключ ФИО посчитан для старых строк: лишний пробел не плодит двойника.
+            assert s.get_or_create_student("иванов иван", "ИС-21").id == 1
+            assert s.get_or_create_student("Петров Пётр", "ИС-21").card_code is None
+            assert s.count_students() == 2 and s.count_cards() == 1
+
+    def test_migration_is_idempotent(self, tmp_path):
+        path = tmp_path / "v2.db"
+        self._make_v2(path)
+        with Storage(path):
+            pass
+        with Storage(path) as s:
+            assert s.conn.execute("SELECT COUNT(*) FROM attendance").fetchone()[0] == 2
+            assert s.conn.execute("SELECT value FROM meta WHERE key='schema_version'"
+                                  ).fetchone()[0] == "3"

@@ -223,18 +223,23 @@ class TestWriting:
         assert load_workbook(first).active["C3"].fill.patternType is None
         assert load_workbook(second).active["C3"].fill.patternType == "solid"
 
-    @pytest.mark.parametrize("still_present", [True, False])
-    def test_reexport_clears_outdated_late_fill(self, roster_file, still_present):
+    def test_reexport_clears_outdated_late_fill(self, roster_file):
         parsed = R.read_roster(roster_file)
         R.write_attendance(parsed, {DAY_ONE: {
             NAMES[0]: datetime(2026, 9, 20, 9, 0),
             NAMES[1]: datetime(2026, 9, 20, 9, 10),
         }})
-        updated = {NAMES[1]: datetime(2026, 9, 20, 9, 10)} if still_present else {}
-        R.write_attendance(parsed, {DAY_ONE: updated})
+        R.write_attendance(parsed, {DAY_ONE: {NAMES[1]: datetime(2026, 9, 20, 9, 10)}})
         sheet = load_workbook(roster_file).active
         assert sheet["C4"].fill.patternType is None
-        assert sheet["C4"].value == ("09:10" if still_present else R.ABSENT_MARK)
+        assert sheet["C4"].value == "09:10"
+
+    def test_time_in_file_is_never_replaced_by_dash(self, roster_file):
+        """Файл главнее: нет отметки в базе — не повод стирать время в файле."""
+        parsed = R.read_roster(roster_file)
+        R.write_attendance(parsed, {DAY_ONE: {NAMES[1]: datetime(2026, 9, 20, 9, 10)}})
+        R.write_attendance(parsed, {DAY_ONE: {}})
+        assert load_workbook(roster_file).active["C4"].value == "09:10"
 
     def test_date_column_added(self, roster_file):
         parsed = R.read_roster(roster_file)
@@ -269,7 +274,8 @@ class TestWriting:
         sheet = load_workbook(roster_file).active
         assert sheet.cell(row=2, column=3).value == "20.09"
         assert sheet.cell(row=2, column=4).value is None
-        assert sheet.cell(row=3, column=3).value == R.ABSENT_MARK
+        # Время из прошлой записи остаётся: файл главнее, стирать его нечем.
+        assert sheet.cell(row=3, column=3).value == "09:02"
         assert sheet.cell(row=4, column=3).value == "09:07"
 
     def test_names_and_numbers_are_not_touched(self, roster_file):
