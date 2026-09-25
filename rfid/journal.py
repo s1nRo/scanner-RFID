@@ -19,15 +19,15 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
-from . import roster as R
-from .storage import (
-    IMPORT_ADDED, IMPORT_KEPT, IMPORT_RAW, IMPORT_SAME, IMPORT_UPDATED,
-    Storage, Subject,
-)
+from . import excel
+from .db import IMPORT_RAW, ImportStatus, Storage, Subject
+from .excel import SubjectFolder, discover_subjects
+from .names import normalize_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +46,7 @@ class FillResult:
 
 
 def fill_subject(
-    storage: Storage, subject: Subject, folder: R.SubjectFolder
+    storage: Storage, subject: Subject, folder: SubjectFolder
 ) -> list[FillResult]:
     """Заполнить все списки групп внутри папки предмета.
 
@@ -60,7 +60,7 @@ def fill_subject(
     marks = storage.marks_by_day(subject)
     # Группа студента известна из базы — её записали, когда привязывали карту.
     group_of = {
-        R.normalize_name(s.full_name): s.group_name for s in storage.list_students()
+        normalize_name(s.full_name): s.group_name for s in storage.list_students()
     }
     results = []
     for path in folder.rosters:
@@ -84,8 +84,8 @@ def _fill_one(
     # права лишить остальные группы записи. Один раз уже случалось — пустой
     # .xlsx рядом ронял выгрузку целиком, и отметки не доходили ни до кого.
     try:
-        parsed = R.read_roster(path)
-    except R.RosterError as exc:
+        parsed = excel.read_roster(path)
+    except excel.RosterError as exc:
         return FillResult(path, path.stem, error=str(exc))
     except Exception as exc:
         return FillResult(
@@ -94,7 +94,7 @@ def _fill_one(
         )
 
     try:
-        R.write_attendance(parsed, marks)
+        excel.write_attendance(parsed, marks)
     except PermissionError:
         return FillResult(
             path,
@@ -122,7 +122,7 @@ def _fill_one(
 
 
 def _missing_from_file(
-    parsed: R.Roster,
+    parsed: excel.Roster,
     marks: dict[date, dict[str, datetime]],
     group_of: dict[str, str],
 ) -> tuple[str, ...]:
@@ -131,13 +131,13 @@ def _missing_from_file(
     Студенты других групп сюда не попадают: их в этом файле и не должно быть.
     А вот своя фамилия, пропавшая из списка, — это разорванная связь.
     """
-    in_file = {R.normalize_name(s.full_name) for s in parsed.students}
+    in_file = {normalize_name(s.full_name) for s in parsed.students}
     missing = {
         name
         for day in marks.values()
         for name in day
-        if group_of.get(R.normalize_name(name)) == parsed.group_name
-        and R.normalize_name(name) not in in_file
+        if group_of.get(normalize_name(name)) == parsed.group_name
+        and normalize_name(name) not in in_file
     }
     return tuple(sorted(missing))
 
@@ -182,7 +182,7 @@ class _DryRun(Exception):
 
 def import_subject(
     storage: Storage,
-    folder: R.SubjectFolder,
+    folder: SubjectFolder,
     today: date | None = None,
     *,
     sync: bool = False,
@@ -203,16 +203,17 @@ def import_subject(
 
     Людей из списка заводим в базе без карты — связь с таблицей по ФИО.
     """
-    if not dry_run:
+    def run() -> list[ImportResult]:
         subject = storage.get_or_create_subject(folder.name)
         return [_import_one(storage, subject, path, today, sync) for path in folder.rosters]
+
+    if not dry_run:
+        return run()
 
     results: list[ImportResult] = []
     try:
         with storage.transaction():
-            subject = storage.get_or_create_subject(folder.name)
-            results = [_import_one(storage, subject, path, today, sync)
-                       for path in folder.rosters]
+            results = run()
             raise _DryRun
     except _DryRun:
         pass
@@ -223,10 +224,10 @@ def _import_one(
     storage: Storage, subject: Subject, path: Path, today: date | None, sync: bool
 ) -> ImportResult:
     try:
-        parsed = R.read_roster(path)
-        found = R.read_attendance(parsed, today)
+        parsed = excel.read_roster(path)
+        found = excel.read_attendance(parsed, today)
         saved_at = datetime.fromtimestamp(path.stat().st_mtime)
-    except R.RosterError as exc:
+    except excel.RosterError as exc:
         return ImportResult(path, path.stem, error=str(exc))
     except PermissionError:
         return ImportResult(path, path.stem,
@@ -235,7 +236,7 @@ def _import_one(
         return ImportResult(path, path.stem,
                             error=f"не удалось прочитать ({type(exc).__name__}: {exc})")
 
-    counts = {IMPORT_ADDED: 0, IMPORT_UPDATED: 0, IMPORT_KEPT: 0, IMPORT_SAME: 0}
+    counts: Counter[ImportStatus] = Counter()
     removed: list[Removal] = []
     newer = 0
     raw = f"{IMPORT_RAW}{path.name}"
@@ -278,10 +279,10 @@ def _import_one(
     return ImportResult(
         path=path,
         group_name=parsed.group_name,
-        added=counts[IMPORT_ADDED],
-        updated=counts[IMPORT_UPDATED],
-        conflicts=counts[IMPORT_KEPT],
-        same=counts[IMPORT_SAME],
+        added=counts[ImportStatus.ADDED],
+        updated=counts[ImportStatus.UPDATED],
+        conflicts=counts[ImportStatus.KEPT],
+        same=counts[ImportStatus.SAME],
         removed=tuple(removed),
         newer=newer,
         dates=tuple(sorted(found.marks)),
@@ -290,7 +291,7 @@ def _import_one(
 
 
 def sync_subject(
-    storage: Storage, folder: R.SubjectFolder, today: date | None = None
+    storage: Storage, folder: SubjectFolder, today: date | None = None
 ) -> tuple[list[ImportResult], list[FillResult]]:
     """Полная синхронизация: таблицы → база, затем база → таблицы.
 
@@ -305,7 +306,7 @@ def sync_subject(
 def fill_all(storage: Storage, tables_dir: str | Path) -> dict[str, list[FillResult]]:
     """Пройти по всем папкам-предметам и заполнить всё, где были занятия."""
     out: dict[str, list[FillResult]] = {}
-    for folder in R.discover_subjects(tables_dir):
+    for folder in discover_subjects(tables_dir):
         subject = storage.find_subject(folder.name)
         if subject is None:
             continue  # по этому предмету отметок ещё не было

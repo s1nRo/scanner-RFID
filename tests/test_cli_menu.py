@@ -7,7 +7,8 @@
 import pytest
 
 from rfid import cli
-from test_roster import make_roster_file
+from rfid.cli import common, subjects
+from tests.helpers import make_roster_file
 
 
 class Args:
@@ -20,7 +21,7 @@ class Args:
 @pytest.fixture
 def answers(monkeypatch):
     queue: list[str] = []
-    monkeypatch.setattr(cli, "_ask", lambda _p: queue.pop(0) if queue else "0")
+    monkeypatch.setattr(common, "ask", lambda _p: queue.pop(0) if queue else "0")
     return queue
 
 
@@ -43,7 +44,7 @@ class TestExiting:
         def boom(_p):
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(cli, "_ask", boom)
+        monkeypatch.setattr(common, "ask", boom)
         assert cli.cmd_menu(Args(tmp_path)) == 0
 
     def test_zero_at_the_pause_exits(self, tmp_path, answers, ran):
@@ -79,7 +80,7 @@ class TestBackFromPicker:
         answers += ["0"]
 
         with pytest.raises(cli.Cancelled):
-            cli.choose_subject(Args(tmp_path), tmp_path)
+            subjects.choose_subject(Args(tmp_path), tmp_path)
 
         assert "Нет такого пункта" not in capsys.readouterr().out
 

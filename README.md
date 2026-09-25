@@ -252,6 +252,7 @@ PID и завели; нам их софт не нужен, а обратный �
 ```powershell
 venv\bin\python.exe -m pip install -r requirements-dev.txt
 venv\bin\python.exe -m pytest tests -q
+venv\bin\python.exe -m pyright           # проверка типов, должно быть 0 errors
 
 rfid --db data/demo.db scan --mode mock   # прогон без железа
 

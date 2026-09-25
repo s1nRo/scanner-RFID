@@ -1,0 +1,13 @@
+# Настройки инструментов. Пакетом проект не ставится: запуск — python -m rfid.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Проверка типов (pyright; VS Code/Pylance читает эти же настройки).
+# venv собран MSYS2-сборкой Python: раскладка POSIX, venv/bin и venv/lib.
+[tool.pyright]
+include = ["rfid", "tests"]
+venvPath = "."
+venv = "venv"
+pythonVersion = "3.12"
+pythonPlatform = "Windows"

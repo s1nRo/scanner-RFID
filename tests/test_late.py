@@ -5,12 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from rfid import cli, roster as R
-from rfid.codes import parse_line
-from rfid.storage import Storage
-from test_roster import make_roster_file
+from rfid import cli, lessons
+from rfid.cli import common
+from rfid.db import Storage
+from tests.helpers import card, make_roster_file
 
-CARDS = [parse_line(f"Em-Marine[A100] 007,{n}") for n in range(40, 45)]
+CARDS = [card(f"Em-Marine[A100] 007,{n}") for n in range(40, 45)]
 GROUP = "1000000/10001"
 NAMES = ["Первый Пришедший", "Вовремя Вера", "Опоздавший Олег", "Поздний Павел"]
 
@@ -21,26 +21,26 @@ def at(hour, minute):
 
 class TestLateArrivals:
     def test_counted_from_lesson_start(self):
-        late = R.late_arrivals({"a": at(9, 0), "b": at(9, 9), "c": at(9, 10), "d": at(9, 40)})
+        late = lessons.late_arrivals({"a": at(9, 0), "b": at(9, 9), "c": at(9, 10), "d": at(9, 40)})
         assert [(who, start) for who, _, start in late] == [("c", at(9, 0)), ("d", at(9, 0))]
 
     def test_same_rule_as_yellow_fill(self):
         """Список обязан совпадать с подсветкой в таблице."""
         arrivals = {"a": at(9, 0), "b": at(9, 12), "c": at(11, 0), "d": at(11, 30)}
-        starts = R.session_starts(arrivals.values())
-        expected = {who for who, t in arrivals.items() if R.is_late(t, starts)}
-        assert {who for who, _, _ in R.late_arrivals(arrivals)} == expected
+        starts = lessons.session_starts(arrivals.values())
+        expected = {who for who, t in arrivals.items() if lessons.is_late(t, starts)}
+        assert {who for who, _, _ in lessons.late_arrivals(arrivals)} == expected
 
     def test_each_lesson_has_its_own_start(self):
-        late = R.late_arrivals({"a": at(9, 0), "b": at(11, 0), "c": at(11, 15)})
+        late = lessons.late_arrivals({"a": at(9, 0), "b": at(11, 0), "c": at(11, 15)})
         assert [(who, start) for who, _, start in late] == [("c", at(11, 0))]
 
     def test_sorted_by_arrival(self):
-        late = R.late_arrivals({"x": at(9, 50), "y": at(9, 0), "z": at(9, 20)})
+        late = lessons.late_arrivals({"x": at(9, 50), "y": at(9, 0), "z": at(9, 20)})
         assert [who for who, _, _ in late] == ["z", "x"]
 
     def test_nobody(self):
-        assert R.late_arrivals({}) == []
+        assert lessons.late_arrivals({}) == []
 
 
 @pytest.fixture
@@ -52,10 +52,10 @@ def setup(tmp_path):
     db = tmp_path / "late.db"
     with Storage(db) as s:
         subject = s.add_subject("Бургеростроение")
-        for card, name in zip(CARDS, NAMES):
-            s.add_student(card, name, GROUP)
-        for card, t in zip(CARDS, [at(9, 0), at(9, 5), at(9, 25), at(10, 2)]):
-            s.mark(card, subject, at=t)
+        for code, name in zip(CARDS, NAMES):
+            s.add_student(code, name, GROUP)
+        for code, t in zip(CARDS, [at(9, 0), at(9, 5), at(9, 25), at(10, 2)]):
+            s.mark(code, subject, at=t)
     return SimpleNamespace(db=db, tables=tables, subject="Бургеростроение", date=None)
 
 
@@ -70,7 +70,7 @@ class TestCommand:
         assert "Всего: 2" in out
 
     def test_enter_picks_the_latest_day(self, setup, monkeypatch, capsys):
-        monkeypatch.setattr(cli, "_ask", lambda _p: "")
+        monkeypatch.setattr(common, "ask", lambda _p: "")
         cli.cmd_late(setup)
         assert "20.09.2026" in capsys.readouterr().out
 
@@ -87,9 +87,9 @@ class TestCommand:
         assert "отметок ещё не было" in capsys.readouterr().out
 
     def test_back_from_day_picker(self, setup, monkeypatch):
-        monkeypatch.setattr(cli, "_ask", lambda _p: "0")
+        monkeypatch.setattr(common, "ask", lambda _p: "0")
         with pytest.raises(cli.Cancelled):
             cli.cmd_late(setup)
 
     def test_in_menu(self):
-        assert any(action == "late" for _, _, action in cli.MENU)
+        assert any(argv == ["late"] for _, _, argv in cli.MENU)

@@ -6,11 +6,13 @@
 """
 
 import builtins
-import sys
 
 import pytest
 
-from rfid import keys, readers
+from rfid import scanner
+from rfid.cli import keys
+from tests.helpers import FakeSerial
+from tests.test_readers import CARD_A
 
 
 class FakeMsvcrt:
@@ -82,23 +84,22 @@ class TestStopWatcher:
 
 class TestReaderStops:
     def test_reader_asks_the_watcher(self):
-        reader = readers.SerialCardReader("COM_TEST", should_stop=lambda: True)
+        reader = scanner.SerialCardReader("COM_TEST", should_stop=lambda: True)
         assert reader._expired() is True
 
     def test_reader_runs_while_watcher_is_quiet(self):
-        reader = readers.SerialCardReader("COM_TEST", should_stop=lambda: False)
+        reader = scanner.SerialCardReader("COM_TEST", should_stop=lambda: False)
         assert reader._expired() is False
 
     def test_default_watcher_never_stops(self):
-        assert readers.SerialCardReader("COM_TEST")._expired() is False
+        assert scanner.SerialCardReader("COM_TEST")._expired() is False
 
     def test_watcher_stops_the_read_loop(self):
         """Нажатие прерывает цикл, даже если порт продолжает слать данные."""
-        from test_readers import CARD_A, FakeSerial
 
         line = (CARD_A + "\r\n").encode()
         pressed = {"yes": False}
-        reader = readers.SerialCardReader(
+        reader = scanner.SerialCardReader(
             "COM_TEST", should_stop=lambda: pressed["yes"]
         )
         scans = []
@@ -114,16 +115,15 @@ class TestReaderStops:
         Они физически приложены, и потерять их нельзя: буфер дочитывается
         до конца, и только потом цикл останавливается.
         """
-        from test_readers import CARD_A, FakeSerial
 
         line = (CARD_A + "\r\n").encode()
-        reader = readers.SerialCardReader("COM_TEST", should_stop=lambda: True)
+        reader = scanner.SerialCardReader("COM_TEST", should_stop=lambda: True)
         # Три строки пришли одним куском, клавиша нажата с самого начала.
         scans = list(reader._read_forever(FakeSerial(line * 3, len(line) * 3)))
         assert len(scans) == 0, "до первого чтения цикл выходит сразу"
 
         pressed = {"yes": False}
-        reader = readers.SerialCardReader("COM_TEST", should_stop=lambda: pressed["yes"])
+        reader = scanner.SerialCardReader("COM_TEST", should_stop=lambda: pressed["yes"])
         got = []
         for scan in reader._read_forever(FakeSerial(line * 3, len(line) * 3)):
             got.append(scan)

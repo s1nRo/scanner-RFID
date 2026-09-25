@@ -1,15 +1,15 @@
 """Вывод отметок в консоль.
 
-Слой намеренно отделён от логики: pipeline отдаёт сюда готовый MarkResult
-и ничего не знает о том, как он показан. Панель на Tkinter, если её делать,
-встанет на это же место без правок ядра.
+ConsoleView реализует pipeline.View: цикл отметки отдаёт сюда готовый
+MarkResult и ничего не знает о том, как он показан. Панель на Tkinter,
+если её делать, реализует тот же View в своём пакете, без правок ядра.
 """
 
 from __future__ import annotations
 
 import sys
 
-from .storage import MarkResult, MarkStatus
+from ..db import MarkResult, MarkStatus
 
 _GREEN = "\033[42;30m"
 _YELLOW = "\033[43;30m"
@@ -86,16 +86,17 @@ class ConsoleView:
 
     def show(self, result: MarkResult) -> None:
         code = result.code
+        student = result.student
         hint = ""
 
-        if result.status is MarkStatus.MARKED:
+        if result.status is MarkStatus.MARKED and student is not None:
             label = " ОТМЕЧЕН"
-            main = result.student.full_name
-            right = f"{result.student.group_name}  {result.at.strftime('%H:%M')}"
+            main = student.full_name
+            right = f"{student.group_name}  {result.at.strftime('%H:%M')}"
             paint, ok = _GREEN, True
         elif result.status is MarkStatus.DUPLICATE:
             label = " УЖЕ ОТМЕЧЕН"
-            main = result.student.full_name if result.student else code.pretty
+            main = student.full_name if student else code.pretty
             when = result.first_at.strftime("%H:%M") if result.first_at else "сегодня"
             right = f"с {when}"
             paint, ok = _YELLOW, True

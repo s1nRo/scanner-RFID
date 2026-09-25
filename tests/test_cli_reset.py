@@ -9,11 +9,11 @@ from datetime import datetime
 import pytest
 
 from rfid import cli
-from rfid.codes import parse_line
-from rfid.storage import Storage
-from test_roster import make_roster_file
+from rfid.cli import common
+from rfid.db import Storage
+from tests.helpers import card, make_roster_file
 
-CARD_A = parse_line("Em-Marine[A100] 007,42")
+CARD_A = card("Em-Marine[A100] 007,42")
 MORNING = datetime(2026, 9, 20, 9, 2)
 
 
@@ -59,12 +59,12 @@ class TestReset:
         assert counts(filled) == (0, 0, 0)
 
     def test_declining_changes_nothing(self, filled, monkeypatch):
-        monkeypatch.setattr(cli, "_ask", lambda _p: "n")
+        monkeypatch.setattr(common, "ask", lambda _p: "n")
         cli.cmd_reset(ResetArgs(filled, "all", yes=False))
         assert counts(filled) == (1, 1, 1)
 
     def test_confirming_proceeds(self, filled, monkeypatch):
-        monkeypatch.setattr(cli, "_ask", lambda _p: "y")
+        monkeypatch.setattr(common, "ask", lambda _p: "y")
         cli.cmd_reset(ResetArgs(filled, "all", yes=False))
         assert counts(filled) == (0, 0, 0)
 
@@ -88,17 +88,17 @@ class TestConfirm:
 
     @pytest.mark.parametrize("answer", ["y", "Y", "yes"])
     def test_yes(self, monkeypatch, answer):
-        monkeypatch.setattr(cli, "_ask", lambda _p: answer)
-        assert cli._confirm("Удалить?") is True
+        monkeypatch.setattr(common, "ask", lambda _p: answer)
+        assert common.confirm("Удалить?") is True
 
     @pytest.mark.parametrize("answer", ["n", "N", "", "да", "н", "нет", "no"])
     def test_everything_else_is_no(self, monkeypatch, answer):
         # «н» — это y в русской раскладке; случайное согласие хуже отказа.
-        monkeypatch.setattr(cli, "_ask", lambda _p: answer)
-        assert cli._confirm("Удалить?") is False
+        monkeypatch.setattr(common, "ask", lambda _p: answer)
+        assert common.confirm("Удалить?") is False
 
     def test_prompt_shows_y_n(self, monkeypatch):
         seen = []
-        monkeypatch.setattr(cli, "_ask", lambda p: seen.append(p) or "n")
-        cli._confirm("Удалить?")
+        monkeypatch.setattr(common, "ask", lambda p: seen.append(p) or "n")
+        common.confirm("Удалить?")
         assert seen == ["Удалить? (y/n): "]
