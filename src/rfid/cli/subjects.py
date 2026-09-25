@@ -134,12 +134,21 @@ def names_with_cards(storage: Storage) -> set[str]:
     return {normalize_name(s.full_name) for s in storage.list_students(with_card=True)}
 
 
-def print_candidates(candidates: list[Candidate], storage: Storage) -> None:
-    """Список с подписями групп, но сквозной нумерацией."""
+def print_candidates(
+    candidates: list[Candidate], storage: Storage, *, without_card_only: bool = False
+) -> None:
+    """Список с подписями групп, но сквозной нумерацией.
+
+    without_card_only — только те, у кого карты ещё нет: на паре выбирать
+    приходится из них, и короткий список легче пробежать глазами. Номера
+    остаются сквозными, как в полном списке.
+    """
     known = names_with_cards(storage)
     group = None
     print()
     for item in candidates:
+        if without_card_only and normalize_name(item.full_name) in known:
+            continue
         if item.group_name != group:
             group = item.group_name
             print(f"\n  {group}")

@@ -1,11 +1,16 @@
-"""Команды, которые слушают считыватель: отметка, привязка карт, «чья карта»."""
+"""Команды, которые слушают считыватель: отметка, привязка карт, «чья карта».
+
+scan --enroll совмещает первые две: пара идёт как обычно, а незнакомая
+карта сразу привязывается к студенту из списка — отдельный заход
+с rfid enroll перед парой не нужен.
+"""
 
 from __future__ import annotations
 
 from datetime import date
 
 from .. import pipeline
-from ..db import CardConflict, Storage
+from ..db import CardConflict, MarkResult, MarkStatus, Storage, Student
 from ..scanner import CardCode, CardReader, ReaderUnavailable, make_reader
 from . import common
 from .common import DATE_INPUT, Interrupted
@@ -49,18 +54,81 @@ def _open_reader(args, view: ConsoleView) -> CardReader:
 # ----------------------------------------------------------------------- scan
 
 
+class BindingView(ConsoleView):
+    """Вывод пары, который незнакомую карту сразу предлагает привязать.
+
+    Отметка к этому моменту уже в базе — пока безымянная. Привязка делает
+    её именной: bind_card забирает себе прошлые отметки карты, включая эту.
+    Поэтому ни пропуск, ни опечатка в номере отметку не теряют: карта
+    останется в «неизвестных», и её можно привязать позже.
+    """
+
+    unknown_hint = "записано. Кто это? Выберите номер из списка ниже."
+
+    def __init__(self, storage: Storage, candidates: list[Candidate],
+                 reader: CardReader | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self.storage = storage
+        self.candidates = candidates
+        self.reader = reader
+        self.bound = 0
+        # Сколько «неизвестных» по счётчику цикла на самом деле стали
+        # отмеченными: в итоге они должны числиться отмеченными.
+        self.bound_from_unknown = 0
+
+    def summary(self, marked: int, duplicates: int, unknown: int) -> None:
+        moved = self.bound_from_unknown
+        super().summary(marked + moved, duplicates, unknown - moved)
+
+    def show(self, result: MarkResult) -> None:
+        super().show(result)
+        if result.student is not None:
+            return
+        if bound_count(self.candidates, self.storage) == len(self.candidates):
+            print("  У всех студентов предмета карта уже есть — эта, видимо, чужая. "
+                  "Отметка сохранена.")
+            return
+        try:
+            print_candidates(self.candidates, self.storage, without_card_only=True)
+            choice = common.ask("\n  Номер студента (Enter — оставить без привязки): ")
+        finally:
+            # Пока оператор выбирал, к считывателю могли приложить карту:
+            # эти строки не должны всплыть уже после выбора, как чужие.
+            if self.reader is not None:
+                self.reader.flush()
+
+        student = _bind(self.storage, result.code, self.candidates, choice,
+                        includes_current=True)
+        if student is None:
+            print("  Карта осталась непривязанной, отметка сохранена.")
+            return
+        self.bound += 1
+        if result.status is MarkStatus.UNKNOWN:
+            self.bound_from_unknown += 1
+        # Та же отметка, но теперь именная.
+        super().show(MarkResult(MarkStatus.MARKED, result.code, result.at,
+                                student, result.first_at or result.at))
+
+
 def cmd_scan(args) -> int:
     view = ConsoleView(sound=not args.no_sound)
     guard_mock(args)
     folder = choose_subject(args, args.tables)
     require_rosters(folder)
+    candidates = all_candidates(folder) if args.enroll else []
     reader = _open_reader(args, view)
 
     with Storage(args.db) as storage:
         subject = storage.get_or_create_subject(folder.name)
-        view.banner(f"{folder.name} — {date.today().strftime(DATE_INPUT)}")
+        if args.enroll:
+            view = BindingView(storage, candidates, reader, sound=not args.no_sound)
+        title = " — отметка и привязка новых карт" if args.enroll else ""
+        view.banner(f"{folder.name} — {date.today().strftime(DATE_INPUT)}{title}")
         view.status(f"Источник: {reader.description}")
         view.status(f"Групп в предмете: {folder.group_count}")
+        if args.enroll:
+            view.status(f"С картами: {bound_count(candidates, storage)} "
+                        f"из {len(candidates)}. Незнакомую карту привяжете сразу.")
         view.status(f"{STOP_HINT}. Ctrl+C тоже работает.")
         print()
 
@@ -76,6 +144,9 @@ def cmd_scan(args) -> int:
             failure = exc
 
         view.summary(*(pipeline.tally_line(tally) if tally else (0, 0, 0)))
+        if isinstance(view, BindingView):
+            print(f"Из неизвестных привязано на ходу: {view.bound}.  "
+                  f"С картами: {bound_count(candidates, storage)} из {len(candidates)}.")
 
         if tally and pipeline.failed_count(tally):
             print(f"\n!!! Не удалось записать отметок: {pipeline.failed_count(tally)}.")
@@ -135,7 +206,8 @@ def cmd_enroll(args) -> int:
 
                 if choice in ("0", "q"):
                     break
-                added += _bind(storage, scan.code, candidates, choice)
+                if _bind(storage, scan.code, candidates, choice) is not None:
+                    added += 1
                 print(_NEXT_CARD)
         except KeyboardInterrupt:
             print()
@@ -148,22 +220,30 @@ def cmd_enroll(args) -> int:
     return 0
 
 
-def _bind(storage: Storage, code: CardCode, candidates: list[Candidate], choice: str) -> int:
-    """Привязать карту к выбранному номеру. Возвращает 1, если привязана."""
+def _bind(
+    storage: Storage, code: CardCode, candidates: list[Candidate], choice: str,
+    *, includes_current: bool = False,
+) -> Student | None:
+    """Привязать карту к выбранному номеру. Возвращает студента или None.
+
+    includes_current — карту привязывают прямо на паре, и среди зачтённых
+    отметок есть только что сделанная. «Прошлыми» её называть нельзя.
+    """
     chosen = by_number(candidates, choice)
     if chosen is None:
         print("  пропущено" if not choice else "  нет такого номера")
-        return 0
+        return None
     try:
         saved, credited = storage.bind_card(code, chosen.full_name, chosen.group_name)
     except CardConflict as exc:
         print(f"  Не привязано: {exc}. Сначала снимите старую: "
               f"rfid students remove {exc.student.card_code}")
-        return 0
+        return None
     print(f"  Привязано: {saved.full_name} ({saved.group_name})")
-    if credited:
-        print(f"  Прошлых отметок зачтено: {credited}")
-    return 1
+    past = credited - 1 if includes_current else credited
+    if past > 0:
+        print(f"  Прошлых отметок зачтено: {past}")
+    return saved
 
 
 # ---------------------------------------------------------------------- whois

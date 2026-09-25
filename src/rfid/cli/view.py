@@ -69,6 +69,10 @@ def beep(ok: bool) -> None:
 
 
 class ConsoleView:
+    # Что подсказать под незнакомой картой. Режим с привязкой на ходу
+    # подставляет своё: там карту привязывают сразу, а не через enroll.
+    unknown_hint = "записано. Привязать карту к студенту:  rfid enroll"
+
     def __init__(self, *, color: bool | None = None, sound: bool = True):
         self.color = enable_ansi() if color is None else color
         self.sound = sound
@@ -104,7 +108,7 @@ class ConsoleView:
             label = " НЕИЗВЕСТНАЯ КАРТА"
             main = f"{code.canonical}  ({code.pretty})"
             right = result.at.strftime("%H:%M")
-            hint = "записано. Привязать карту к студенту:  rfid enroll"
+            hint = self.unknown_hint
             paint, ok = _RED, False
 
         print(self._paint(_layout(label, main, right), paint))

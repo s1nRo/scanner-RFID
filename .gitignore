@@ -26,3 +26,4 @@ example/
 dump*.txt
 driver/
 *.zip
+.ruff_cache
