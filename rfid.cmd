@@ -14,9 +14,12 @@ set "RFID_HOME=%~dp0"
 set "PY=%~dp0venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=%~dp0venv\bin\python.exe"
 if not exist "%PY%" goto not_installed
-"%PY%" -c "import rfid" 2>nul
+REM -P: never import from the current folder, only the installed program.
+REM Otherwise a stray rfid\ folder (e.g. left from an older version)
+REM could run instead of it.
+"%PY%" -P -c "import rfid" 2>nul
 if errorlevel 1 goto not_installed
-"%PY%" -m rfid %*
+"%PY%" -P -m rfid %*
 exit /b %errorlevel%
 
 :not_installed
