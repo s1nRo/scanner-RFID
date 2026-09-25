@@ -156,6 +156,7 @@ class SerialCardReader:
         on_status: StatusFn = _silent,
         reconnect: bool = True,
         stop_after: float | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ):
         self.port = port
         self.baud = baud
@@ -163,6 +164,9 @@ class SerialCardReader:
         self.on_status = on_status
         self.reconnect = reconnect
         self.stop_after = stop_after
+        # Спрашивается между чтениями порта: цикл ждёт карту, а не клавиатуру,
+        # поэтому опрос обязан быть неблокирующим.
+        self.should_stop = should_stop or (lambda: False)
         self._deadline: float | None = None
         self._serial: serial.Serial | None = None
         self.description = f"COM-порт {port}, {baud} бод, {stopbits} стоп-бит(а)"
@@ -180,7 +184,10 @@ class SerialCardReader:
                 pass
 
     def _expired(self) -> bool:
-        return self._deadline is not None and time.monotonic() >= self._deadline
+        """Пора заканчивать: вышло время или оператор нажал клавишу выхода."""
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            return True
+        return self.should_stop()
 
     def _open(self) -> serial.Serial:
         return serial.Serial(
@@ -337,6 +344,7 @@ def make_reader(
     on_status: StatusFn = _silent,
     mock_lines: Iterable[str] | None = None,
     stop_after: float | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> CardReader:
     if mode == "mock":
         return MockCardReader(lines=mock_lines or [], on_status=on_status)
@@ -344,15 +352,16 @@ def make_reader(
         return KeyboardCardReader(on_status=on_status)
 
     device = port or find_reader_port()
+    options = {"on_status": on_status, "stop_after": stop_after, "should_stop": should_stop}
 
     if mode == "serial":
         if not device:
             raise ReaderUnavailable(no_port_explanation())
-        return SerialCardReader(device, on_status=on_status, stop_after=stop_after)
+        return SerialCardReader(device, **options)
 
     if mode == "auto":
         if device:
-            return SerialCardReader(device, on_status=on_status, stop_after=stop_after)
+            return SerialCardReader(device, **options)
         # Молча переходить на ручной ввод нельзя: человек ждёт, что приложит
         # карту, а у него вдруг просят набрать код. Лучше честно отказать.
         raise ReaderUnavailable(no_port_explanation())

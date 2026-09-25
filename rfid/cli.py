@@ -30,6 +30,7 @@ from . import journal, pipeline
 from . import roster as R
 from .codes import CardCodeError, parse_manual
 from .console import ConsoleView
+from .keys import STOP_HINT, make_stop_watcher
 from .readers import (
     ReaderUnavailable,
     available_ports,
@@ -288,6 +289,7 @@ def cmd_enroll(args) -> int:
         reader = make_reader(
             args.mode, port=args.port, on_status=view.status,
             mock_lines=DEMO_LINES, stop_after=args.seconds,
+            should_stop=make_stop_watcher(),
         )
     except ReaderUnavailable as exc:
         print(exc)
@@ -301,7 +303,7 @@ def cmd_enroll(args) -> int:
         added = 0
         try:
             _print_candidates(candidates, storage)
-            print("\n  Приложите карту студента…   (Ctrl+C — закончить)")
+            print(f"\n  Приложите карту студента…   ({STOP_HINT})")
             for scan in reader.scans():
                 code = scan.code
                 known = storage.find_student(code)
@@ -366,6 +368,7 @@ def cmd_scan(args) -> int:
         reader = make_reader(
             args.mode, port=args.port, on_status=view.status,
             mock_lines=DEMO_LINES, stop_after=args.seconds,
+            should_stop=make_stop_watcher(),
         )
     except ReaderUnavailable as exc:
         print(exc)
@@ -376,7 +379,7 @@ def cmd_scan(args) -> int:
         view.banner(f"{folder.name} — {date.today().strftime(DATE_INPUT)}")
         view.status(f"Источник: {reader.description}")
         view.status(f"Групп в предмете: {folder.group_count}")
-        view.status("Ctrl+C — завершить.")
+        view.status(f"{STOP_HINT}. Ctrl+C тоже работает.")
         print()
 
         try:
@@ -416,6 +419,7 @@ def cmd_whois(args) -> int:
         reader = make_reader(
             args.mode, port=args.port, on_status=view.status,
             mock_lines=DEMO_LINES, stop_after=args.seconds,
+            should_stop=make_stop_watcher(),
         )
     except ReaderUnavailable as exc:
         print(exc)
@@ -423,7 +427,7 @@ def cmd_whois(args) -> int:
 
     with Storage(args.db) as storage:
         view.banner("Чья карта")
-        view.status("Прикладывайте карту. Отметки не записываются. Ctrl+C — выход.")
+        view.status(f"Прикладывайте карту. Отметки не записываются. {STOP_HINT}.")
         print()
         try:
             for scan in reader.scans():
