@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+from typing import TypeVar
+
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -66,6 +68,8 @@ _NAME_HEADER = re.compile(r"ФИО|фамилия", re.IGNORECASE)
 # Номер группы «по виду»: 1000000/10001, 1000000-10001 и подобные.
 # Нужен, когда слова «Группа» в файле нет — например «ИКНК 1000000/10002».
 _GROUP_CODE_RE = re.compile(r"\d{3,}\s*[/\\.\-]\s*\d{2,}")
+
+K = TypeVar("K")
 
 
 class RosterError(Exception):
@@ -246,6 +250,22 @@ def session_start_for(at: datetime, starts: list[datetime]) -> datetime | None:
 def is_late(at: datetime, starts: list[datetime]) -> bool:
     start = session_start_for(at, starts)
     return start is not None and at - start >= LATE_AFTER
+
+
+def late_arrivals(arrivals: dict[K, datetime]) -> list[tuple[K, datetime, datetime]]:
+    """Опоздавшие за день: (кто, пришёл, начало его пары), по времени прихода.
+
+    Правило то же, что у жёлтой подсветки в файлах (is_late): иначе список
+    на экране и таблица расходились бы. arrivals — все приходы предмета
+    за день, всех групп: начало пары считается по ним всем.
+    """
+    starts = session_starts(arrivals.values())
+    late = [
+        (who, at, session_start_for(at, starts))
+        for who, at in arrivals.items()
+        if is_late(at, starts)
+    ]
+    return sorted(late, key=lambda item: item[1])
 
 
 def write_attendance(

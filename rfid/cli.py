@@ -8,6 +8,7 @@
     python -m rfid students ...     кому какая карта принадлежит
     python -m rfid unknown ...      неизвестные карты
     python -m rfid report           кто пришёл, кого нет
+    python -m rfid late             опоздавшие — показывают конспект
     python -m rfid export           проставить отметки в файлах групп
     python -m rfid import [--sync]  обновить базу из файлов групп
     python -m rfid doctor           проверка железа, драйвера и базы
@@ -479,12 +480,13 @@ MENU = [
     ("1", "Отмечать студентов", "scan"),
     ("2", "Привязать карты к студентам", "enroll"),
     ("3", "Кто пришёл сегодня", "report"),
-    ("4", "Чья это карта", "whois"),
-    ("5", "Предметы и группы", "subjects"),
-    ("6", "Кому какая карта принадлежит", "students-list"),
-    ("7", "Заполнить файлы групп", "export"),
-    ("8", "Обновить базу из файлов групп", "import"),
-    ("9", "Проверить оборудование", "doctor"),
+    ("4", "Опоздавшие — показывают конспект", "late"),
+    ("5", "Чья это карта", "whois"),
+    ("6", "Предметы и группы", "subjects"),
+    ("7", "Кому какая карта принадлежит", "students-list"),
+    ("8", "Заполнить файлы групп", "export"),
+    ("9", "Обновить базу из файлов групп", "import"),
+    ("10", "Проверить оборудование", "doctor"),
 ]
 
 _MENU_ARGV = {"students-list": ["students", "list"], "import": ["import", "--choose"]}
@@ -504,8 +506,8 @@ def cmd_menu(args) -> int:
         print("  Учёт посещаемости по RFID-картам")
         print("  " + "─" * 44)
         for key, title, _ in MENU:
-            print(f"    {key}. {title}")
-        print("    0. Выход       (или Ctrl+C)")
+            print(f"   {key:>2}. {title}")
+        print("    0. Выход        (или Ctrl+C)")
         print()
 
         try:
@@ -725,6 +727,64 @@ def cmd_report(args) -> int:
             for card_code, at in unknown:
                 print(f"  {card_code}  {at.strftime('%H:%M')}")
     return 0
+
+
+def cmd_late(args) -> int:
+    """Опоздавшие на занятии — те, кто показывает конспект."""
+    folder = choose_subject(args, args.tables)
+
+    with Storage(args.db) as storage:
+        subject = storage.find_subject(folder.name)
+        days = storage.subject_dates(subject) if subject else []
+        if not days:
+            print(f"По предмету «{folder.name}» отметок ещё не было.")
+            return 0
+        day = _parse_date(args.date) if args.date else _choose_day(days)
+
+        # Только именные приходы — ровно те, что попадают в файлы групп,
+        # чтобы список совпадал с жёлтой подсветкой в таблице.
+        arrivals = {row.student: row.at for row in storage.day_rows(day, subject)
+                    if row.present}
+        late = R.late_arrivals(arrivals)
+
+        minutes = int(R.LATE_AFTER.total_seconds() // 60)
+        print()
+        print(f"{folder.name} — {day.strftime(DATE_INPUT)}")
+        print(f"Опоздали ({minutes} мин и больше от начала пары) — показывают конспект")
+        print("─" * 70)
+        if not late:
+            print("Опоздавших нет." if arrivals else "В этот день никто не отмечен.")
+            return 0
+
+        start = None
+        for student, at, lesson_start in late:
+            if lesson_start != start:
+                start = lesson_start
+                print(f"\nПара с {start.strftime('%H:%M')}")
+            delay = int((at - lesson_start).total_seconds() // 60)
+            print(f"   {student.full_name:<38} {student.group_name:<16} "
+                  f"{at.strftime('%H:%M')}   +{delay} мин")
+        print("─" * 70)
+        print(f"Всего: {len(late)}")
+    return 0
+
+
+def _choose_day(days: list[date]) -> date:
+    """Выбрать день из тех, когда были отметки. Enter — последний."""
+    recent = sorted(days, reverse=True)[:10]
+    print()
+    print("  День занятия:")
+    for index, day in enumerate(recent, start=1):
+        print(f"    {index}. {day.strftime(DATE_INPUT)}")
+    print("    0. назад")
+    choice = _ask("\n  Выберите номер (Enter — последний): ")
+    if not choice:
+        return recent[0]
+    if choice in ("0", "q"):
+        raise Cancelled
+    if choice.isdigit() and 1 <= int(choice) <= len(recent):
+        return recent[int(choice) - 1]
+    raise Interrupted("  Нет такого пункта.")
 
 
 def cmd_reset(args) -> int:
@@ -954,6 +1014,11 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--group", help="только эта группа")
     report.add_argument("--subject", help="имя папки-предмета")
     report.set_defaults(func=cmd_report)
+
+    late = subparsers.add_parser("late", help="опоздавшие — показывают конспект")
+    late.add_argument("--date", help="ДД.ММ.ГГГГ; иначе будет предложен выбор")
+    late.add_argument("--subject", help="имя папки-предмета")
+    late.set_defaults(func=cmd_late)
 
     export_cmd = subparsers.add_parser("export", help="проставить отметки в файлах групп")
     export_cmd.set_defaults(func=cmd_export)
