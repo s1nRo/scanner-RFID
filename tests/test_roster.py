@@ -468,3 +468,55 @@ class TestSessionSplitting:
         starts = R.session_starts([self.at(9, 0)])
         assert R.is_late(self.at(9, 0) + R.LATE_AFTER, starts) is True
         assert R.is_late(self.at(9, 9), starts) is False
+
+
+class TestWriteSafety:
+    """Список групп даёт пользователь, восстановить его неоткуда.
+
+    Реальная потеря данных 25.09.2026: openpyxl.save() сначала обнуляет файл
+    и только потом пишет, поэтому сорвавшаяся запись оставляла от списка
+    пустышку в 0 байт. Запись теперь идёт через временный файл.
+    """
+
+    def test_failed_write_leaves_the_roster_intact(self, roster_file, monkeypatch):
+        before = roster_file.read_bytes()
+        assert before[:2] == b"PK"
+
+        def boom(*_a, **_kw):
+            raise PermissionError(13, "file is locked")
+
+        monkeypatch.setattr(R.os, "replace", boom)
+        with pytest.raises(PermissionError):
+            R.write_attendance(R.read_roster(roster_file), {DAY_ONE: {}})
+
+        assert roster_file.read_bytes() == before, "оригинал не должен пострадать"
+
+    def test_broken_save_leaves_the_roster_intact(self, roster_file, monkeypatch):
+        """Сбой на середине самой записи тоже не должен трогать оригинал."""
+        before = roster_file.read_bytes()
+
+        import openpyxl.workbook.workbook as wb_module
+
+        def boom(self, *_a, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(wb_module.Workbook, "save", boom)
+        with pytest.raises(OSError):
+            R.write_attendance(R.read_roster(roster_file), {DAY_ONE: {}})
+
+        assert roster_file.read_bytes() == before
+
+    def test_no_temp_file_left_behind(self, roster_file, monkeypatch):
+        def boom(*_a, **_kw):
+            raise PermissionError(13, "file is locked")
+
+        monkeypatch.setattr(R.os, "replace", boom)
+        with pytest.raises(PermissionError):
+            R.write_attendance(R.read_roster(roster_file), {DAY_ONE: {}})
+
+        assert list(roster_file.parent.glob("*.tmp")) == []
+
+    def test_successful_write_leaves_no_temp(self, roster_file):
+        R.write_attendance(R.read_roster(roster_file), {DAY_ONE: {}})
+        assert list(roster_file.parent.glob("*.tmp")) == []
+        assert roster_file.read_bytes()[:2] == b"PK"
