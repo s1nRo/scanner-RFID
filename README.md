@@ -35,24 +35,33 @@ tables/
 
 ## Быстрый старт
 
-```powershell
-venv\bin\python.exe -m pip install -r requirements.txt
+Нужен Python 3.11 или новее. В распакованной папке один раз:
 
-rfid               # меню: спросит, что делать
+```powershell
+.\install.cmd     # создаёт venv, ставит программу, заводит data\ и tables\
+.\rfid.cmd        # меню: спросит, что делать
 ```
 
-`rfid.cmd` — обёртка вокруг `venv\bin\python.exe -m rfid`. Интерпретатор лежит
-в `venv\bin`, а не в `venv\Scripts`: venv собран MSYS2-сборкой Python.
-В `PATH` обёртка не прописана, поэтому звать её надо по-разному:
+`install.cmd` можно запускать повторно — так ставится новая версия после
+распаковки свежего архива поверх старого. `data\` и `tables\` при этом
+не трогаются.
+
+`rfid.cmd` запускает программу из любой папки:
 
 | Оболочка | Вызов |
 |---|---|
 | PowerShell | `.\rfid.cmd doctor` |
 | cmd.exe | `rfid.cmd doctor` |
 | Git Bash | `./rfid.cmd doctor` |
-| откуда угодно | `venv\bin\python.exe -m rfid doctor` |
+| откуда угодно | `D:\путь\к\папке\rfid.cmd doctor` |
 
 Ниже для краткости пишется просто `rfid`.
+
+**Рабочая папка.** База (`data\attendance.db`) и списки групп (`tables\`)
+всегда лежат рядом с `rfid.cmd`, из какой бы папки его ни запустили.
+Другая рабочая папка — флаг `--home` или переменная `RFID_HOME`.
+Если рабочую папку не найти, программа откажется работать, а не заведёт
+пустую базу в случайном месте: иначе отметки ушли бы мимо журнала.
 
 ## Формат списка группы
 
@@ -250,9 +259,10 @@ PID и завели; нам их софт не нужен, а обратный �
 ## Разработка
 
 ```powershell
-venv\bin\python.exe -m pip install -r requirements-dev.txt
-venv\bin\python.exe -m pytest tests -q
-venv\bin\python.exe -m pyright           # проверка типов, должно быть 0 errors
+venv\bin\python.exe -m pip install -e ".[dev]"   # редактируемая установка из src\
+venv\bin\python.exe -m pytest -q
+venv\bin\python.exe -m pyright                 # проверка типов, должно быть 0 errors
+uvx ruff check                                  # линтер, настройки в pyproject.toml
 
 rfid --db data/demo.db scan --mode mock   # прогон без железа
 

@@ -1,13 +1,43 @@
-# Настройки инструментов. Пакетом проект не ставится: запуск — python -m rfid.
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rfid-attendance"
+description = "Учёт посещаемости по RFID-картам IronLogic: отметки в ваших же списках групп Excel."
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version"]
+dependencies = [
+    "openpyxl>=3.1",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+# Проверка типов: python -m pyright. Нужен установленный Node.js.
+# ruff сюда не входит: под MSYS-сборку Python его колёс нет — запускайте
+# через uvx ruff check (настройки ниже).
+dev = [
+    "pytest>=8.0",
+    "pyright>=1.1.400",
+]
+
+[project.scripts]
+rfid = "rfid.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "rfid.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 # Проверка типов (pyright; VS Code/Pylance читает эти же настройки).
-# venv собран MSYS2-сборкой Python: раскладка POSIX, venv/bin и venv/lib.
 [tool.pyright]
-include = ["rfid", "tests"]
+include = ["src", "tests"]
+# Редактируемая установка подключает src через хук импорта, который
+# статический анализ не видит, — поэтому путь указан явно.
+extraPaths = ["src"]
 venvPath = "."
 venv = "venv"
-pythonVersion = "3.12"
+pythonVersion = "3.11"
 pythonPlatform = "Windows"

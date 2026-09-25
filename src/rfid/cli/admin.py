@@ -43,7 +43,7 @@ def cmd_doctor(args) -> int:
             print(f"[ OK ] {package} установлен")
         except ImportError:
             ok = False
-            print(f"[ !! ] нет {package}:  py -m pip install -r requirements.txt")
+            print(f"[ !! ] нет {package}: запустите install.cmd ещё раз")
 
     folders = discover_subjects(args.tables)
     if folders:

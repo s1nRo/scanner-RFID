@@ -1,5 +1,6 @@
 @echo off
-REM Wrapper around "python -m rfid".
+REM Starts the program: rfid.cmd [command] [options]. Without a command - menu.
+REM Install first with install.cmd.
 REM
 REM Works with either venv layout: Scripts (standard Windows Python) or bin
 REM (venv built by an MSYS2/MinGW Python, as on the original dev machine).
@@ -12,10 +13,12 @@ REM no matter which folder the command is started from.
 set "RFID_HOME=%~dp0"
 set "PY=%~dp0venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=%~dp0venv\bin\python.exe"
-if not exist "%PY%" (
-  echo Python not found in venv.
-  echo Create it:  py -3 -m venv venv
-  echo Then:       venv\Scripts\python.exe -m pip install -r requirements.txt
-  exit /b 1
-)
+if not exist "%PY%" goto not_installed
+"%PY%" -c "import rfid" 2>nul
+if errorlevel 1 goto not_installed
 "%PY%" -m rfid %*
+exit /b %errorlevel%
+
+:not_installed
+echo The program is not installed yet. Run install.cmd from this folder first.
+exit /b 1

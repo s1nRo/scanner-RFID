@@ -4,5 +4,5 @@
 # разработчика.
 .gitattributes   export-ignore
 .gitignore       export-ignore
-requirements-dev.txt export-ignore
 tests/           export-ignore
+*.cmd text eol=crlf
