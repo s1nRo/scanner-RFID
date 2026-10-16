@@ -50,7 +50,7 @@ if errorlevel 1 (
 
 echo Installing the program and its dependencies...
 "%PY%" -m pip install --upgrade --quiet pip
-"%PY%" -m pip install --upgrade --quiet .
+"%PY%" -m pip install --upgrade --quiet ".[gui]"
 if errorlevel 1 (
   echo Installation failed, see the messages above.
   exit /b 1

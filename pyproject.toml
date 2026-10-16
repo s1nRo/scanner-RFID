@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gui = [
+    "PyQt5>=5.15.10",
+]
 # Проверка типов: python -m pyright. Нужен установленный Node.js.
 # ruff сюда не входит: под MSYS-сборку Python его колёс нет — запускайте
 # через uvx ruff check (настройки ниже).
