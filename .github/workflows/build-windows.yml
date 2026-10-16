@@ -30,27 +30,45 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[gui,dev]" pyinstaller
+          python -m pip install ".[gui,dev]"
 
       - name: Run tests
         run: python -m pytest
 
-      - name: Build executable
+      # Тот же скрипт, что и при локальной сборке, — чтобы exe из CI
+      # и собранный руками не расходились.
+      - name: Build executables
+        shell: cmd
+        env:
+          BUILD_PY: python
+        run: build-exe.cmd
+
+      # exe обязан работать с data\ и tables\ рядом с собой, а в чужой
+      # папке — отказаться, а не завести пустую базу.
+      - name: Smoke-test rfid.exe
         shell: pwsh
         run: |
-          python -m PyInstaller `
-            --noconfirm `
-            --clean `
-            --onefile `
-            --windowed `
-            --name RFID-Scanner `
-            --collect-all openpyxl `
-            windows_launcher.py
+          $home_dir = Join-Path $env:RUNNER_TEMP "rfid-home"
+          New-Item -ItemType Directory -Force (Join-Path $home_dir "tables") | Out-Null
+          Copy-Item dist\rfid.exe $home_dir
+          Push-Location $env:RUNNER_TEMP
+          & (Join-Path $home_dir "rfid.exe") subjects
+          if ($LASTEXITCODE -ne 0) { throw "rfid.exe не нашёл свою папку" }
+          $stranger = Join-Path $env:RUNNER_TEMP "stranger"
+          New-Item -ItemType Directory -Force $stranger | Out-Null
+          Copy-Item dist\rfid.exe $stranger
+          & (Join-Path $stranger "rfid.exe") subjects
+          if ($LASTEXITCODE -eq 0) { throw "rfid.exe принял чужую папку за рабочую" }
+          if (Test-Path (Join-Path $stranger "data")) { throw "rfid.exe завёл data в чужой папке" }
+          Pop-Location
+          exit 0
 
-      - name: Upload executable
+      - name: Upload executables
         uses: actions/upload-artifact@v4
         with:
           name: RFID-Scanner-Windows
-          path: dist/RFID-Scanner.exe
+          path: |
+            dist/rfid.exe
+            dist/RFID-Scanner.exe
           if-no-files-found: error
           retention-days: 30

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from PyQt5.QtCore import QDate, QDateTime, Qt, QThread
@@ -506,7 +506,7 @@ class AttendanceWindow(QMainWindow):
         self.recent_list.clear()
         recent = sorted(
             (row for row in snapshot.rows if row.at is not None),
-            key=lambda row: row.at,
+            key=lambda row: row.at or datetime.min,  # None отсеяны выше
             reverse=True,
         )[:8]
         for row in recent:

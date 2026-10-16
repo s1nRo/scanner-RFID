@@ -10,7 +10,10 @@
 
     1. --home                  явно указано в командной строке
     2. переменная RFID_HOME    её выставляет rfid.cmd: папка, где он лежит
-    3. текущая папка           только если в ней уже есть data/ или tables/
+    3. папка exe               у собранного rfid.exe вместо текущей папки,
+                               и тоже только если в ней есть data/ или tables/:
+                               exe в папке программы работает с её данными
+    4. текущая папка           только если в ней уже есть data/ или tables/
 
 Относительные --db и --tables считаются от рабочей папки, а не от текущей.
 """
@@ -18,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from .common import Interrupted
@@ -34,10 +38,17 @@ def find_home(explicit: str | Path | None = None) -> Path | None:
     from_env = os.environ.get(HOME_ENV)
     if from_env:
         return _existing(Path(from_env), HOME_ENV)
+    if getattr(sys, "frozen", False):
+        # Только папка самого exe и только похожая на рабочую. exe, запущенный
+        # из «Загрузок», не должен завести там пустую базу.
+        exe_folder = Path(sys.executable).resolve().parent
+        return exe_folder if _looks_like_home(exe_folder) else None
     cwd = Path.cwd()
-    if (cwd / DB_FILE.parent).is_dir() or (cwd / TABLES_DIR).is_dir():
-        return cwd.resolve()
-    return None
+    return cwd.resolve() if _looks_like_home(cwd) else None
+
+
+def _looks_like_home(folder: Path) -> bool:
+    return (folder / DB_FILE.parent).is_dir() or (folder / TABLES_DIR).is_dir()
 
 
 def _existing(path: Path, source: str) -> Path:
@@ -92,6 +103,14 @@ def guard_mock(args) -> None:
 
 
 def no_home_explanation() -> str:
+    if getattr(sys, "frozen", False):
+        exe_folder = Path(sys.executable).resolve().parent
+        return (
+            f"  Рядом с программой ({exe_folder}) нет папок {DB_FILE.parent} и {TABLES_DIR}.\n\n"
+            "  Положите exe в папку программы — туда, где уже лежат data и tables.\n"
+            "  Для первой установки создайте рядом с exe папку tables, а в ней —\n"
+            "  папку предмета со списками групп."
+        )
     return (
         f"  Не найдена рабочая папка — там, где лежат {DB_FILE.parent}/ и {TABLES_DIR}/.\n"
         f"  Текущая папка ({Path.cwd()}) на неё не похожа, а заводить базу\n"

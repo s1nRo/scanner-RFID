@@ -104,11 +104,20 @@ def unmatched_names(roster: Roster, names: list[str]) -> list[str]:
     return [name for name in names if roster.find(name) is None]
 
 
+def _rows(sheet: Worksheet | ReadOnlyWorksheet) -> int:
+    """Число строк листа. В потоковом режиме openpyxl может не знать размер."""
+    return sheet.max_row or 0
+
+
+def _columns(sheet: Worksheet | ReadOnlyWorksheet) -> int:
+    return sheet.max_column or 0
+
+
 def _detect_header(sheet: Worksheet | ReadOnlyWorksheet) -> tuple[int, int]:
     """Найти строку шапки и колонку с ФИО."""
-    depth = min(sheet.max_row, _HEADER_SEARCH_DEPTH)
+    depth = min(_rows(sheet), _HEADER_SEARCH_DEPTH)
     for row in range(1, depth + 1):
-        for col in range(1, min(sheet.max_column, _SEARCH_WIDTH) + 1):
+        for col in range(1, min(_columns(sheet), _SEARCH_WIDTH) + 1):
             value = sheet.cell(row=row, column=col).value
             if isinstance(value, str) and _NAME_HEADER.search(value):
                 return row, col
@@ -120,7 +129,7 @@ def _read_students(
 ) -> list[RosterStudent]:
     students: list[RosterStudent] = []
     row = header_row + 1
-    while row <= sheet.max_row:
+    while row <= _rows(sheet):
         value = sheet.cell(row=row, column=name_col).value
         if value is None or not str(value).strip():
             break  # список кончился; ниже могут быть примечания
@@ -133,7 +142,7 @@ def _read_students(
 
 def _cells_above_header(sheet: Worksheet | ReadOnlyWorksheet, header_row: int):
     for row in range(1, header_row):
-        for col in range(1, min(sheet.max_column, _SEARCH_WIDTH) + 1):
+        for col in range(1, min(_columns(sheet), _SEARCH_WIDTH) + 1):
             value = sheet.cell(row=row, column=col).value
             if isinstance(value, str) and value.strip():
                 yield value.strip()
