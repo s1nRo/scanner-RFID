@@ -11,6 +11,7 @@ from rfid import cli
 from rfid.cli import common
 from rfid.cli.marking import DEMO_LINES
 from rfid.db import Storage
+from rfid.scanner.manual import MockCardReader
 from tests.helpers import ROSTER_NAMES, card, make_roster_file, must
 
 SUBJECT = "Бургеростроение"
@@ -120,6 +121,33 @@ class TestBindingOnTheFly:
         # Список — между подсказкой и ответом «оставить без привязки».
         listing = out.split("Кто это?")[1].split("Карта осталась")[0]
         assert ROSTER_NAMES[0] in listing and ROSTER_NAMES[1] not in listing
+
+    def test_cards_read_during_the_question_are_kept(self, home, answers, monkeypatch):
+        # Пока оператор выбирает номер, очередь идёт: приложенные в это время
+        # карты — пришедшие студенты. Сброс порта выкинул бы их отметки.
+        flushed: list[bool] = []
+        monkeypatch.setattr(MockCardReader, "flush", lambda self: flushed.append(True))
+        queue, _ = answers
+        queue += ["1", ""]
+        run(home)
+        assert flushed == []
+
+    def test_ctrl_c_at_the_question_keeps_the_summary(self, home, monkeypatch, capsys):
+        # Ctrl+C выносит цикл без возврата; итог всё равно обязан посчитать
+        # уже записанное, а не показать «Отмечено: 0».
+        replies = iter(["1"])
+
+        def fake_ask(prompt):
+            try:
+                return next(replies)
+            except StopIteration:
+                raise KeyboardInterrupt from None
+
+        monkeypatch.setattr(common, "ask", fake_ask)
+        run(home)
+        out = capsys.readouterr().out
+        assert "Отмечено: 1   повторов: 0   неизвестных карт: 1" in out
+        assert "Из неизвестных привязано на ходу: 1" in out
 
     def test_plain_scan_does_not_ask(self, home, answers):
         _, asked = answers

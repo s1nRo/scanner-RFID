@@ -56,6 +56,7 @@ def run(
     subject: Subject,
     *,
     debounce: float = DEFAULT_DEBOUNCE,
+    tally: Counter | None = None,
 ) -> Counter:
     """Крутить цикл отметок до выхода. Возвращает счётчик по статусам.
 
@@ -63,9 +64,14 @@ def run(
     сеанс оборвётся на пятом студенте, остальные двадцать не отметятся,
     а человек у считывателя этого даже не заметит. Поэтому сбой записи
     и сбой вывода обрабатываются по отдельности и громко, но цикл живёт.
+
+    tally — счётчик снаружи. Ctrl+C или ошибка выносят цикл без возврата,
+    и свой счётчик пропал бы вместе с ним: итог показал бы «Отмечено: 0»,
+    хотя отметки в базе есть.
     """
     guard = Debounce(debounce)
-    tally: Counter = Counter()
+    if tally is None:
+        tally = Counter()
 
     for scan in reader.scans():
         if guard.is_repeat(scan.code.canonical, scan.at.timestamp()):

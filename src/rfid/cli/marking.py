@@ -7,6 +7,7 @@ scan --enroll совмещает первые две: пара идёт как �
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date
 
 from .. import pipeline
@@ -65,12 +66,10 @@ class BindingView(ConsoleView):
 
     unknown_hint = "записано. Кто это? Выберите номер из списка ниже."
 
-    def __init__(self, storage: Storage, candidates: list[Candidate],
-                 reader: CardReader | None = None, **kwargs):
+    def __init__(self, storage: Storage, candidates: list[Candidate], **kwargs):
         super().__init__(**kwargs)
         self.storage = storage
         self.candidates = candidates
-        self.reader = reader
         self.bound = 0
         # Сколько «неизвестных» по счётчику цикла на самом деле стали
         # отмеченными: в итоге они должны числиться отмеченными.
@@ -88,14 +87,11 @@ class BindingView(ConsoleView):
             print("  У всех студентов предмета карта уже есть — эта, видимо, чужая. "
                   "Отметка сохранена.")
             return
-        try:
-            print_candidates(self.candidates, self.storage, without_card_only=True)
-            choice = common.ask("\n  Номер студента (Enter — оставить без привязки): ")
-        finally:
-            # Пока оператор выбирал, к считывателю могли приложить карту:
-            # эти строки не должны всплыть уже после выбора, как чужие.
-            if self.reader is not None:
-                self.reader.flush()
+        # Порт после вопроса НЕ сбрасываем, в отличие от rfid enroll. Здесь
+        # идёт пара: карта, приложенная, пока оператор выбирал номер, — это
+        # пришедший студент. Сброс молча выкинул бы его отметку.
+        print_candidates(self.candidates, self.storage, without_card_only=True)
+        choice = common.ask("\n  Номер студента (Enter — оставить без привязки): ")
 
         student = _bind(self.storage, result.code, self.candidates, choice,
                         includes_current=True)
@@ -121,7 +117,7 @@ def cmd_scan(args) -> int:
     with Storage(args.db) as storage:
         subject = storage.get_or_create_subject(folder.name)
         if args.enroll:
-            view = BindingView(storage, candidates, reader, sound=not args.no_sound)
+            view = BindingView(storage, candidates, sound=not args.no_sound)
         title = " — отметка и привязка новых карт" if args.enroll else ""
         view.banner(f"{folder.name} — {date.today().strftime(DATE_INPUT)}{title}")
         view.status(f"Источник: {reader.description}")
@@ -132,10 +128,11 @@ def cmd_scan(args) -> int:
         view.status(f"{STOP_HINT}. Ctrl+C тоже работает.")
         print()
 
-        tally = None
+        tally: Counter = Counter()
         failure: BaseException | None = None
         try:
-            tally = pipeline.run(reader, storage, view, subject, debounce=args.debounce)
+            pipeline.run(reader, storage, view, subject,
+                         debounce=args.debounce, tally=tally)
         except KeyboardInterrupt:
             print()
         except Exception as exc:
@@ -143,12 +140,12 @@ def cmd_scan(args) -> int:
             # а не потерять вместе с трассировкой.
             failure = exc
 
-        view.summary(*(pipeline.tally_line(tally) if tally else (0, 0, 0)))
+        view.summary(*pipeline.tally_line(tally))
         if isinstance(view, BindingView):
             print(f"Из неизвестных привязано на ходу: {view.bound}.  "
                   f"С картами: {bound_count(candidates, storage)} из {len(candidates)}.")
 
-        if tally and pipeline.failed_count(tally):
+        if pipeline.failed_count(tally):
             print(f"\n!!! Не удалось записать отметок: {pipeline.failed_count(tally)}.")
             print("    Эти студенты НЕ отмечены, их надо провести заново.")
 
