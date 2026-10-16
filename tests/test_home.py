@@ -55,6 +55,43 @@ class TestFindHome:
         monkeypatch.chdir(workdir)
         assert H.find_home() == workdir.resolve()
 
+    def test_exe_folder(self, workdir, stranger, monkeypatch):
+        # rfid.exe работает с data/ и tables/ рядом с собой, откуда его ни запусти.
+        monkeypatch.setattr(H.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(H.sys, "executable", str(workdir / "rfid.exe"))
+        assert H.find_home() == workdir.resolve()
+
+    def test_exe_in_a_stranger_folder_finds_nothing(self, stranger, monkeypatch):
+        # Запуск из «Загрузок» — не повод заводить там пустую базу.
+        monkeypatch.setattr(H.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(H.sys, "executable", str(stranger / "rfid.exe"))
+        assert H.find_home() is None
+        assert "Рядом с программой" in H.no_home_explanation()
+
+    def test_exe_ignores_current_folder(self, workdir, stranger, monkeypatch):
+        monkeypatch.setattr(H.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(H.sys, "executable", str(stranger / "rfid.exe"))
+        monkeypatch.chdir(workdir)
+        assert H.find_home() is None
+
+    def test_folder_chosen_in_the_window(self, workdir, stranger, monkeypatch):
+        # Папка, выбранная в RFID-Scanner.exe, видна и консоли: база одна.
+        monkeypatch.setattr(H.workdir, "remembered", lambda: workdir.resolve())
+        assert H.find_home() == workdir.resolve()
+
+    def test_folder_beside_beats_the_chosen_one(self, workdir, tmp_path, monkeypatch):
+        other = tmp_path / "другая"
+        (other / "data").mkdir(parents=True)
+        monkeypatch.setattr(H.workdir, "remembered", lambda: other)
+        monkeypatch.chdir(workdir)
+        assert H.find_home() == workdir.resolve()
+
+    def test_env_variable_beats_exe_folder(self, workdir, tmp_path, monkeypatch):
+        monkeypatch.setattr(H.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(H.sys, "executable", str(tmp_path / "rfid.exe"))
+        monkeypatch.setenv(H.HOME_ENV, str(workdir))
+        assert H.find_home() == workdir.resolve()
+
     def test_stranger_folder_is_not_home(self, stranger):
         assert H.find_home() is None
 

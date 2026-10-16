@@ -149,6 +149,25 @@ class TestBindingOnTheFly:
         assert "Отмечено: 1   повторов: 0   неизвестных карт: 1" in out
         assert "Из неизвестных привязано на ходу: 1" in out
 
+    def test_student_added_to_the_file_mid_lesson_is_offered(self, home, monkeypatch,
+                                                             capsys):
+        # Список перечитывается на каждой незнакомой карте, а не один раз
+        # в начале пары: дописанного в Excel студента видно сразу.
+        newcomer = "Новиков Новик Новикович"
+        roster = home / "tables" / SUBJECT / "10001.xlsx"
+        prompts: list[str] = []
+
+        def fake_ask(prompt):
+            prompts.append(capsys.readouterr().out)
+            if len(prompts) == 1:  # пока выбирали первую, в файл дописали человека
+                make_roster_file(roster, names=[*ROSTER_NAMES, newcomer], group=GROUP)
+            return ""
+
+        monkeypatch.setattr(common, "ask", fake_ask)
+        run(home)
+        assert newcomer not in prompts[0]
+        assert newcomer in prompts[1]
+
     def test_plain_scan_does_not_ask(self, home, answers):
         _, asked = answers
         cli.main([

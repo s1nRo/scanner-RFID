@@ -6,4 +6,7 @@
 .gitignore       export-ignore
 tests/           export-ignore
 CLAUDE.md        export-ignore
+build-exe.cmd    export-ignore
+packaging/       export-ignore
+.github/         export-ignore
 *.cmd text eol=crlf

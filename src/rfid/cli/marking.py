@@ -10,22 +10,16 @@ from __future__ import annotations
 from collections import Counter
 from datetime import date
 
-from .. import pipeline
+from .. import enrollment, pipeline
 from ..db import CardConflict, MarkResult, MarkStatus, Storage, Student
+from ..enrollment import Candidate, bound_count, by_number
+from ..excel import SubjectFolder
 from ..scanner import CardCode, CardReader, ReaderUnavailable, make_reader
 from . import common
 from .common import DATE_INPUT, Interrupted
 from .home import guard_mock
 from .keys import STOP_HINT, make_stop_watcher
-from .subjects import (
-    Candidate,
-    all_candidates,
-    bound_count,
-    by_number,
-    choose_subject,
-    print_candidates,
-    require_rosters,
-)
+from .subjects import all_candidates, choose_subject, print_candidates, require_rosters
 from .tables import fill_and_report
 from .view import ConsoleView
 
@@ -66,10 +60,14 @@ class BindingView(ConsoleView):
 
     unknown_hint = "записано. Кто это? Выберите номер из списка ниже."
 
-    def __init__(self, storage: Storage, candidates: list[Candidate], **kwargs):
+    def __init__(self, storage: Storage, candidates: list[Candidate],
+                 folder: SubjectFolder | None = None, **kwargs):
         super().__init__(**kwargs)
         self.storage = storage
         self.candidates = candidates
+        # Списки перечитываются на каждой незнакомой карте: студента,
+        # добавленного в Excel посреди пары, иначе было бы не выбрать.
+        self.folder = folder
         self.bound = 0
         # Сколько «неизвестных» по счётчику цикла на самом деле стали
         # отмеченными: в итоге они должны числиться отмеченными.
@@ -83,6 +81,10 @@ class BindingView(ConsoleView):
         super().show(result)
         if result.student is not None:
             return
+        if self.folder is not None:
+            fresh = enrollment.read_candidates(self.folder).items
+            if fresh:  # файлы пропали или не читаются — работаем с прежним списком
+                self.candidates = fresh
         if bound_count(self.candidates, self.storage) == len(self.candidates):
             print("  У всех студентов предмета карта уже есть — эта, видимо, чужая. "
                   "Отметка сохранена.")
@@ -117,7 +119,7 @@ def cmd_scan(args) -> int:
     with Storage(args.db) as storage:
         subject = storage.get_or_create_subject(folder.name)
         if args.enroll:
-            view = BindingView(storage, candidates, sound=not args.no_sound)
+            view = BindingView(storage, candidates, folder, sound=not args.no_sound)
         title = " — отметка и привязка новых карт" if args.enroll else ""
         view.banner(f"{folder.name} — {date.today().strftime(DATE_INPUT)}{title}")
         view.status(f"Источник: {reader.description}")
@@ -142,6 +144,7 @@ def cmd_scan(args) -> int:
 
         view.summary(*pipeline.tally_line(tally))
         if isinstance(view, BindingView):
+            candidates = view.candidates
             print(f"Из неизвестных привязано на ходу: {view.bound}.  "
                   f"С картами: {bound_count(candidates, storage)} из {len(candidates)}.")
 
@@ -223,24 +226,23 @@ def _bind(
 ) -> Student | None:
     """Привязать карту к выбранному номеру. Возвращает студента или None.
 
-    includes_current — карту привязывают прямо на паре, и среди зачтённых
-    отметок есть только что сделанная. «Прошлыми» её называть нельзя.
+    includes_current — см. enrollment.bind.
     """
     chosen = by_number(candidates, choice)
     if chosen is None:
         print("  пропущено" if not choice else "  нет такого номера")
         return None
     try:
-        saved, credited = storage.bind_card(code, chosen.full_name, chosen.group_name)
+        bound = enrollment.bind(storage, code, chosen.full_name, chosen.group_name,
+                                includes_current=includes_current)
     except CardConflict as exc:
         print(f"  Не привязано: {exc}. Сначала снимите старую: "
               f"rfid students remove {exc.student.card_code}")
         return None
-    print(f"  Привязано: {saved.full_name} ({saved.group_name})")
-    past = credited - 1 if includes_current else credited
-    if past > 0:
-        print(f"  Прошлых отметок зачтено: {past}")
-    return saved
+    print(f"  Привязано: {bound.student.full_name} ({bound.student.group_name})")
+    if bound.past > 0:
+        print(f"  Прошлых отметок зачтено: {bound.past}")
+    return bound.student
 
 
 # ---------------------------------------------------------------------- whois

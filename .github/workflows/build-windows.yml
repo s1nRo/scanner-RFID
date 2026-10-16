@@ -30,36 +30,51 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[gui,dev]" pyinstaller
+          python -m pip install ".[gui,dev]"
 
       - name: Run tests
         run: python -m pytest
 
-      - name: Build executable
-        shell: pwsh
-        run: |
-          python -m PyInstaller `
-            --noconfirm `
-            --clean `
-            --onefile `
-            --windowed `
-            --name RFID-Scanner `
-            --collect-all openpyxl `
-            windows_launcher.py
+      # Тот же скрипт, что и при локальной сборке, — чтобы exe из CI
+      # и собранный руками не расходились.
+      - name: Build executables
+        shell: cmd
+        env:
+          BUILD_PY: python
+        run: build-exe.cmd
 
-      - name: Prepare portable package
+      # exe обязан работать с data\ и tables\ рядом с собой, а в чужой
+      # папке — отказаться, а не завести пустую базу.
+      - name: Smoke-test rfid.exe
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force package/data | Out-Null
-          New-Item -ItemType Directory -Force package/tables | Out-Null
-          Copy-Item dist/RFID-Scanner.exe package/RFID-Scanner.exe
+          $exe = (Resolve-Path dist\rfid.exe).Path
+          $home_dir = Join-Path $env:RUNNER_TEMP "rfid-home"
+          New-Item -ItemType Directory -Force (Join-Path $home_dir "tables") | Out-Null
+          Copy-Item $exe $home_dir
+          Push-Location $env:RUNNER_TEMP
+          & (Join-Path $home_dir "rfid.exe") subjects
+          if ($LASTEXITCODE -ne 0) { throw "rfid.exe не нашёл свою папку" }
+          $stranger = Join-Path $env:RUNNER_TEMP "stranger"
+          New-Item -ItemType Directory -Force $stranger | Out-Null
+          Copy-Item $exe $stranger
+          & (Join-Path $stranger "rfid.exe") subjects
+          if ($LASTEXITCODE -eq 0) { throw "rfid.exe принял чужую папку за рабочую" }
+          if (Test-Path (Join-Path $stranger "data")) { throw "rfid.exe завёл data в чужой папке" }
+          Pop-Location
+          exit 0
+
+      # Пустых data\ и tables\ в комплекте нарочно нет: распакованный
+      # в новое место, exe принял бы их за рабочую папку и завёл бы там
+      # пустую базу мимо настоящей. Без них он ищет папку или спрашивает её.
+      - name: Prepare package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item dist/RFID-Scanner.exe, dist/rfid.exe package/
           Copy-Item WINDOWS-README.txt package/README.txt
-          Set-Content package/data/PLACE_DATABASE_HERE.txt `
-            "The application creates attendance.db here."
-          Set-Content package/tables/PLACE_SUBJECT_FOLDERS_HERE.txt `
-            "Put subject folders with .xlsx group lists here."
 
-      - name: Upload portable package
+      - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: RFID-Scanner-Windows

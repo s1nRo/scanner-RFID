@@ -6,7 +6,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from PyQt5.QtCore import QDate, QDateTime, Qt, QThread, QUrl
@@ -35,12 +35,15 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .. import enrollment, workdir
 from ..db import CardConflict, ImportStatus, MarkResult, MarkStatus, Storage, Student
-from ..excel import RosterError, SubjectFolder, discover_subjects, read_roster
+from ..enrollment import Candidate
+from ..excel import RosterError, SubjectFolder, discover_subjects
 from ..journal import fill_subject, import_subject
-from .data import AttendanceSnapshot, choose_random_late, load_snapshot
+from ..workdir import DB_FILE, TABLES_DIR
+from .binding import BindDialog, error_beep
+from .data import AttendanceSnapshot, cached_roster, choose_random_late, load_snapshot
 from .worker import ScanWorker
-from .workspace import save_workspace, workspace_paths
 
 
 class AttendanceWindow(QMainWindow):
@@ -63,6 +66,7 @@ class AttendanceWindow(QMainWindow):
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanWorker | None = None
         self.pending_cards: list[str] = []
+        self.bind_dialog: BindDialog | None = None
 
         self.setWindowTitle("RFID Журнал — учёт посещаемости")
         self.setMinimumSize(960, 640)
@@ -398,33 +402,11 @@ class AttendanceWindow(QMainWindow):
                 "Сначала остановите сканирование, затем смените папку данных.",
             )
             return
-        selected = QFileDialog.getExistingDirectory(
-            self,
-            "Выберите рабочую папку с data и tables",
-            str(self.tables_path.parent),
-        )
-        if not selected:
+        home = pick_home(self, self.tables_path.parent)
+        if home is None:
             return
-        home = Path(selected)
-        if home.name.casefold() == "tables":
-            home = home.parent
-        tables = home / "tables"
-        data = home / "data"
-        if not tables.exists() and not data.exists():
-            answer = QMessageBox.question(
-                self,
-                "Создать новую рабочую папку?",
-                "В выбранной папке нет data и tables. Создать их?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                return
-        db_path, tables_path = workspace_paths(save_workspace(home))
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        tables_path.mkdir(parents=True, exist_ok=True)
-        self.db_path = db_path
-        self.tables_path = tables_path
+        self.db_path = home / DB_FILE
+        self.tables_path = home / TABLES_DIR
         self.pending_cards.clear()
         self._load_subjects()
         self.statusBar().showMessage(f"Папка данных: {home}", 8000)
@@ -436,7 +418,7 @@ class AttendanceWindow(QMainWindow):
         if folder is not None:
             for path in folder.rosters:
                 try:
-                    group_name = read_roster(path).group_name
+                    group_name = cached_roster(path).group_name
                 except (RosterError, OSError):
                     group_name = path.stem
                 self.roster_file_combo.addItem(
@@ -582,6 +564,7 @@ class AttendanceWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.mark_received.connect(self._mark_received)
+        worker.rejected.connect(self._card_rejected)
         worker.status_changed.connect(self._scan_status)
         worker.failed.connect(self._scan_failed)
         worker.export_finished.connect(self._scan_status)
@@ -611,10 +594,6 @@ class AttendanceWindow(QMainWindow):
             if result.code.canonical not in self.pending_cards:
                 self.pending_cards.append(result.code.canonical)
                 self._refresh_pending_cards()
-            self.statusBar().showMessage(
-                "Карта не привязана. Выберите студента на вкладке «Студенты и карты».",
-                10_000,
-            )
         else:
             name = result.student.full_name
             meta = f"Группа {result.student.group_name or 'не указана'} · {result.at:%H:%M}"
@@ -634,6 +613,111 @@ class AttendanceWindow(QMainWindow):
         self.person_name.setText(name)
         self.person_meta.setText(meta)
         self.scan_status_chip.setText(chip)
+        if result.student is None:
+            self._ask_binding(result)
+
+    def _ask_binding(self, result: MarkResult) -> None:
+        """Незнакомая карта: привязать сразу, как в меню 2 консоли.
+
+        Считыватель уже не принимает карты (ScanWorker закрыл заслонку)
+        и откроется только здесь, в finally, — что бы ни случилось с окном.
+        """
+        try:
+            candidates = self._candidates_without_card()
+            if not candidates:
+                self.statusBar().showMessage(
+                    "У всех студентов предмета карта уже есть — эта, видимо, чужая. "
+                    "Отметка сохранена.", 10_000,
+                )
+                return
+            self._set_waiting(True)
+            while True:
+                dialog = BindDialog(self, result.code.canonical, candidates)
+                self.bind_dialog = dialog
+                try:
+                    accepted = dialog.exec_() == BindDialog.Accepted
+                finally:
+                    self.bind_dialog = None
+                chosen = dialog.chosen() if accepted else None
+                if chosen is None:
+                    self.statusBar().showMessage(
+                        "Карта оставлена без привязки, отметка сохранена. "
+                        "Привязать можно на вкладке «Студенты и карты».", 10_000,
+                    )
+                    return
+                saved = self._bind_code(result.code.canonical, chosen.full_name,
+                                        chosen.group_name, includes_current=True)
+                if saved is not None:
+                    self.person_name.setText(saved.full_name)
+                    self.person_meta.setText(
+                        f"Группа {saved.group_name} · {result.at:%H:%M}"
+                    )
+                    self.scan_status_chip.setText("Карта привязана, отметка сохранена")
+                    return
+                # Привязка не удалась (у студента уже есть карта и т. п.) —
+                # предупреждение показано, спрашиваем снова.
+        finally:
+            self._set_waiting(False)
+            if self.scan_worker is not None:
+                self.scan_worker.release()
+            self._refresh_today()
+
+    def _card_rejected(self, scan) -> None:
+        """Карту приложили, пока ждём привязки, — громко сказать, что не принята."""
+        error_beep()
+        if self.bind_dialog is not None:
+            self.bind_dialog.note_rejected(scan)
+        self.statusBar().showMessage(
+            f"Карта {scan.code.canonical} не принята: сначала привяжите предыдущую. "
+            "Пусть студент приложит её ещё раз.", 10_000,
+        )
+
+    def _set_waiting(self, waiting: bool) -> None:
+        if waiting:
+            self.hero_title.setText("Ждём привязку карты")
+            self.hero_hint.setText(
+                "Другие карты сейчас не принимаются. Выберите студента в окне привязки."
+            )
+        elif self._scanning_active():
+            self.hero_title.setText("Сканирование запущено")
+            self.hero_hint.setText("Приложите карту студента к считывателю")
+
+    def _candidates_without_card(self) -> list[Candidate]:
+        """Кому можно привязать карту — по тому же правилу, что в консоли."""
+        folder = self._current_folder()
+        if folder is None:
+            return []
+        found = enrollment.read_candidates(folder, read=cached_roster)
+        with Storage(self.db_path) as storage:
+            return enrollment.without_card(found.items, storage)
+
+    def _bind_code(
+        self, code: str, full_name: str, group_name: str, *, includes_current: bool
+    ) -> Student | None:
+        """Привязать карту (enrollment.bind). Возвращает студента или None, показав причину."""
+        try:
+            with Storage(self.db_path) as storage:
+                bound = enrollment.bind(storage, code, full_name, group_name,
+                                        includes_current=includes_current)
+        except CardConflict as exc:
+            QMessageBox.warning(
+                self, "Не удалось привязать карту",
+                f"Не привязано: {exc}. Сначала снимите старую карту "
+                f"(rfid students remove {exc.student.card_code}).",
+            )
+            return None
+        except Exception as exc:  # что угодно — сказать, не терять молча
+            QMessageBox.warning(self, "Не удалось привязать карту", str(exc))
+            return None
+        if code in self.pending_cards:
+            self.pending_cards.remove(code)
+            self._refresh_pending_cards()
+        past = f" Прошлых отметок зачтено: {bound.past}." if bound.past > 0 else ""
+        self.statusBar().showMessage(
+            f"Привязано: {bound.student.full_name} ({bound.student.group_name}).{past}",
+            8000,
+        )
+        return bound.student
 
     def _scan_status(self, message: str) -> None:
         self.reader_title.setText("Считыватель работает")
@@ -685,7 +769,7 @@ class AttendanceWindow(QMainWindow):
         self.recent_list.clear()
         recent = sorted(
             (row for row in snapshot.rows if row.at is not None),
-            key=lambda row: row.at,
+            key=lambda row: row.at or datetime.min,  # None отсеяны выше
             reverse=True,
         )[:8]
         for row in recent:
@@ -879,36 +963,13 @@ class AttendanceWindow(QMainWindow):
                     "Сначала отсканируйте непривязанную карту.",
                 )
             return
-        if student.card_code is not None:
-            QMessageBox.warning(
-                self,
-                "Карта уже привязана",
-                f"У студента уже есть карта {student.card_code}.",
-            )
+        saved = self._bind_code(code, student.full_name, student.group_name,
+                                includes_current=False)
+        if saved is None:
             return
-        try:
-            with Storage(self.db_path) as storage:
-                saved, credited = storage.bind_card(
-                    code,
-                    student.full_name,
-                    student.group_name,
-                )
-        except CardConflict as exc:
-            QMessageBox.warning(self, "Не удалось привязать карту", str(exc))
-            return
-        except Exception as exc:
-            QMessageBox.warning(self, "Не удалось привязать карту", str(exc))
-            return
-
-        self.pending_cards.remove(code)
-        self._refresh_pending_cards()
         self.person_name.setText(saved.full_name)
         self.person_meta.setText(f"Группа {saved.group_name} · карта {saved.card_code}")
         self.scan_status_chip.setText("Карта привязана, отметка сохранена")
-        self.statusBar().showMessage(
-            f"Карта привязана. Именных отметок зачтено: {credited}.",
-            8000,
-        )
         folder = self._current_folder()
         if folder is not None and not self._scanning_active():
             self._export_subject_now(folder)
@@ -1008,6 +1069,65 @@ class AttendanceWindow(QMainWindow):
         event.accept()
 
 
+def pick_home(parent: QWidget | None, start: Path | None = None) -> Path | None:
+    """Спросить рабочую папку. Возвращает её или None, если человек передумал.
+
+    Новую пустую папку заводим только с явного согласия: молча созданная
+    база в случайном месте увела бы отметки мимо журнала.
+    """
+    selected = QFileDialog.getExistingDirectory(
+        parent,
+        "Выберите рабочую папку с data и tables",
+        str(start or Path.home()),
+    )
+    if not selected:
+        return None
+    home = Path(selected)
+    if home.name.casefold() in (TABLES_DIR.name, DB_FILE.parent.name):
+        home = home.parent  # выбрали саму tables или data — нужна папка над ней
+    if not workdir.looks_like_home(home):
+        answer = QMessageBox.question(
+            parent,
+            "Создать новую рабочую папку?",
+            f"В папке {home} нет data и tables, то есть нет ни базы, ни списков.\n\n"
+            "Если программа уже работала на этом компьютере, выберите ту папку, "
+            "где лежит rfid.cmd, — иначе отметки начнут писаться в новую пустую "
+            "базу.\n\nСоздать здесь новую рабочую папку?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return None
+        (home / DB_FILE.parent).mkdir(parents=True, exist_ok=True)
+        (home / TABLES_DIR).mkdir(parents=True, exist_ok=True)
+    home = home.resolve()
+    workdir.remember(home)
+    return home
+
+
+def ask_home() -> Path | None:
+    """Рабочая папка не нашлась: объяснить и предложить выбрать."""
+    _application()
+    QMessageBox.information(
+        None,
+        "RFID Журнал",
+        "Не найдена папка с данными программы (data и tables).\n\n"
+        "Укажите папку, где лежит rfid.cmd, — там база и списки групп. "
+        "Выбор запомнится, и окно, и консоль будут работать с ней.",
+    )
+    return pick_home(None)
+
+
+def _application() -> QApplication:
+    app = QApplication.instance()
+    if not isinstance(app, QApplication):
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        app = QApplication(sys.argv[:1])
+        app.setApplicationName("RFID Журнал")
+    return app
+
+
 def run_gui(
     db_path: str | Path,
     tables_path: str | Path,
@@ -1015,12 +1135,7 @@ def run_gui(
     mode: str = "auto",
     port: str | None = None,
 ) -> int:
-    app = QApplication.instance()
-    if app is None:
-        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-        app = QApplication(sys.argv[:1])
-    app.setApplicationName("RFID Журнал")
+    app = _application()
     window = AttendanceWindow(Path(db_path), Path(tables_path), mode=mode, port=port)
     window.show()
     return app.exec_()

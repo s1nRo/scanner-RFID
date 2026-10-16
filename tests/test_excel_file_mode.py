@@ -26,6 +26,16 @@ class WorkbookSpy:
         self.workbook.close()
 
 
+def not_read_only(kwargs: dict) -> bool:
+    """Чтение — в обычном режиме, не read_only.
+
+    read_only держит файл открытым до close() (Excel получает отказ)
+    и на наших листах медленнее в 5–18 раз: окно подвисало на каждом
+    переключении вкладки. Обычный режим отпускает файл сразу после чтения.
+    """
+    return not kwargs.get("read_only", False)
+
+
 def tracking_loader(calls: list[dict], closed: list[bool]):
     def load(*args, **kwargs):
         calls.append(kwargs)
@@ -34,7 +44,7 @@ def tracking_loader(calls: list[dict], closed: list[bool]):
     return load
 
 
-def test_roster_is_read_in_read_only_mode_and_closed(tmp_path, monkeypatch):
+def test_roster_is_read_in_normal_mode_and_closed(tmp_path, monkeypatch):
     path = make_roster_file(tmp_path / "group.xlsx")
     calls: list[dict] = []
     closed: list[bool] = []
@@ -42,11 +52,11 @@ def test_roster_is_read_in_read_only_mode_and_closed(tmp_path, monkeypatch):
 
     excel.read_roster(path)
 
-    assert calls == [{"read_only": True}]
+    assert len(calls) == 1 and not_read_only(calls[0])
     assert closed == [True]
 
 
-def test_attendance_is_read_in_read_only_mode_and_closed(tmp_path, monkeypatch):
+def test_attendance_is_read_in_normal_mode_and_closed(tmp_path, monkeypatch):
     path = make_roster_file(tmp_path / "group.xlsx")
     roster = excel.read_roster(path)
     calls: list[dict] = []
@@ -59,8 +69,19 @@ def test_attendance_is_read_in_read_only_mode_and_closed(tmp_path, monkeypatch):
 
     excel.read_attendance(roster)
 
-    assert calls == [{"read_only": True}]
+    assert len(calls) == 1 and not_read_only(calls[0])
     assert closed == [True]
+
+
+def test_read_leaves_the_file_free(tmp_path):
+    # Сразу после чтения файл можно подменить — как это делает запись
+    # (save_atomically) или Excel при сохранении.
+    path = make_roster_file(tmp_path / "group.xlsx")
+    roster = excel.read_roster(path)
+    excel.read_attendance(roster)
+    moved = path.with_suffix(".moved")
+    path.replace(moved)
+    moved.replace(path)
 
 
 def test_writable_book_is_closed_immediately_after_export(tmp_path, monkeypatch):

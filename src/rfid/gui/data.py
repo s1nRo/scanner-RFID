@@ -103,12 +103,34 @@ def load_snapshot(
         return AttendanceSnapshot(subject, day, rows, stats, late, unknown_cards)
 
 
+# Списки групп по пути: (время изменения, размер) → разобранный список.
+# Снимок строится на каждое переключение вкладки и на каждую карту, а файлы
+# меняются редко — перечитывать их каждый раз значило подвешивать окно.
+_ROSTERS: dict[Path, tuple[tuple[int, int], excel.Roster]] = {}
+
+
+def cached_roster(path: Path) -> excel.Roster:
+    """read_roster, который перечитывает файл, только если тот изменился.
+
+    Правка в Excel, «Загрузить изменения» и наша же запись меняют время
+    изменения файла — устаревший список не останется.
+    """
+    info = path.stat()
+    stamp = (info.st_mtime_ns, info.st_size)
+    hit = _ROSTERS.get(path)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    roster = excel.read_roster(path)
+    _ROSTERS[path] = (stamp, roster)
+    return roster
+
+
 def _roster_people(folder: SubjectFolder) -> set[tuple[str, str]]:
     people: set[tuple[str, str]] = set()
     for path in folder.rosters:
         try:
-            roster = excel.read_roster(path)
-        except excel.RosterError:
+            roster = cached_roster(path)
+        except (excel.RosterError, OSError):
             continue
         people.update(
             (normalize_name(student.full_name), roster.group_name)

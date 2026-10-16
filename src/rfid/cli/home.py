@@ -10,7 +10,13 @@
 
     1. --home                  явно указано в командной строке
     2. переменная RFID_HOME    её выставляет rfid.cmd: папка, где он лежит
-    3. текущая папка           только если в ней уже есть data/ или tables/
+    3. папка exe               у собранного rfid.exe вместо текущей папки,
+                               и тоже только если в ней есть data/ или tables/:
+                               exe в папке программы работает с её данными
+    4. текущая папка           только если в ней уже есть data/ или tables/
+                               (у exe не смотрится: он ищет данные у себя)
+    5. выбранная в окне        папка, которую человек указал в RFID-Scanner.exe
+                               кнопкой «Папка данных…» (rfid.workdir)
 
 Относительные --db и --tables считаются от рабочей папки, а не от текущей.
 """
@@ -18,13 +24,14 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
+from .. import workdir
+from ..workdir import DB_FILE, TABLES_DIR, looks_like_home
 from .common import Interrupted
 
 HOME_ENV = "RFID_HOME"
-DB_FILE = Path("data") / "attendance.db"
-TABLES_DIR = Path("tables")
 
 
 def find_home(explicit: str | Path | None = None) -> Path | None:
@@ -34,10 +41,16 @@ def find_home(explicit: str | Path | None = None) -> Path | None:
     from_env = os.environ.get(HOME_ENV)
     if from_env:
         return _existing(Path(from_env), HOME_ENV)
-    cwd = Path.cwd()
-    if (cwd / DB_FILE.parent).is_dir() or (cwd / TABLES_DIR).is_dir():
-        return cwd.resolve()
-    return None
+    # Рядом с собой — только похожая на рабочую папка. exe, запущенный
+    # из «Загрузок», не должен завести там пустую базу.
+    if getattr(sys, "frozen", False):
+        beside = Path(sys.executable).resolve().parent
+    else:
+        beside = Path.cwd().resolve()
+    if looks_like_home(beside):
+        return beside
+    # Через модуль, а не импортом имени: тесты подменяют память о папке.
+    return workdir.remembered()
 
 
 def _existing(path: Path, source: str) -> Path:
@@ -92,6 +105,14 @@ def guard_mock(args) -> None:
 
 
 def no_home_explanation() -> str:
+    if getattr(sys, "frozen", False):
+        exe_folder = Path(sys.executable).resolve().parent
+        return (
+            f"  Рядом с программой ({exe_folder}) нет папок {DB_FILE.parent} и {TABLES_DIR}.\n\n"
+            "  Положите exe в папку программы — туда, где уже лежат data и tables.\n"
+            "  Для первой установки создайте рядом с exe папку tables, а в ней —\n"
+            "  папку предмета со списками групп."
+        )
     return (
         f"  Не найдена рабочая папка — там, где лежат {DB_FILE.parent}/ и {TABLES_DIR}/.\n"
         f"  Текущая папка ({Path.cwd()}) на неё не похожа, а заводить базу\n"
