@@ -37,7 +37,7 @@ class AttendanceSnapshot:
     rows: tuple[DayRow, ...]
     stats: tuple[GroupStat, ...]
     late: tuple[LateStudent, ...]
-    unknown_count: int = 0
+    unknown_cards: tuple[str, ...] = ()
 
     @property
     def present(self) -> int:
@@ -54,6 +54,10 @@ class AttendanceSnapshot:
     @property
     def percent(self) -> float:
         return self.present / self.total * 100 if self.total else 0.0
+
+    @property
+    def unknown_count(self) -> int:
+        return len(self.unknown_cards)
 
 
 def load_snapshot(
@@ -94,8 +98,9 @@ def load_snapshot(
             LateStudent(student, arrived_at, lesson_started_at)
             for student, arrived_at, lesson_started_at in late_arrivals(arrivals)
         )
-        unknown_count = len(storage.unknown_marks_on(day, subject))
-        return AttendanceSnapshot(subject, day, rows, stats, late, unknown_count)
+        unknown_marks = storage.unknown_marks_on(day, subject)
+        unknown_cards = tuple(dict.fromkeys(code for code, _at in unknown_marks))
+        return AttendanceSnapshot(subject, day, rows, stats, late, unknown_cards)
 
 
 def _roster_people(folder: SubjectFolder) -> set[tuple[str, str]]:

@@ -6,12 +6,13 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from PyQt5.QtCore import QDate, Qt, QThread
+from PyQt5.QtCore import QDate, QDateTime, Qt, QThread
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
     QDateEdit,
+    QDateTimeEdit,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -30,9 +31,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from ..db import MarkResult, MarkStatus, Storage
+from ..db import CardConflict, ImportStatus, MarkResult, MarkStatus, Storage, Student
 from ..excel import SubjectFolder, discover_subjects
-from ..journal import import_subject
+from ..journal import fill_subject, import_subject
 from .data import AttendanceSnapshot, choose_random_late, load_snapshot
 from .worker import ScanWorker
 
@@ -56,6 +57,7 @@ class AttendanceWindow(QMainWindow):
         self.report_snapshot = self.today_snapshot
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanWorker | None = None
+        self.pending_cards: list[str] = []
 
         self.setWindowTitle("RFID Журнал — учёт посещаемости")
         self.setMinimumSize(960, 640)
@@ -76,6 +78,7 @@ class AttendanceWindow(QMainWindow):
         self.pages.addTab(self._build_scan_page(), "Сканирование")
         self.pages.addTab(self._build_attendance_page(), "Посещаемость")
         self.pages.addTab(self._build_late_page(), "Опоздавшие")
+        self.pages.addTab(self._build_students_page(), "Студенты и карты")
         self.pages.currentChanged.connect(self._show_page)
         root_layout.addWidget(self.pages, 1)
         self.setCentralWidget(root)
@@ -241,6 +244,59 @@ class AttendanceWindow(QMainWindow):
         layout.addWidget(random_card, 2)
         return page
 
+    def _build_students_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.students_table = QTableWidget(0, 4)
+        self.students_table.setHorizontalHeaderLabels(
+            ("ФИО", "Группа", "Карта", "Отметка сегодня")
+        )
+        self.students_table.verticalHeader().setVisible(False)
+        self.students_table.setAlternatingRowColors(True)
+        self.students_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.students_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.students_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        students_header = self.students_table.horizontalHeader()
+        students_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        students_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        students_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        students_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        layout.addWidget(self.students_table, 1)
+
+        manual_group = QGroupBox("Ручная отметка выбранного студента")
+        manual_layout = QHBoxLayout(manual_group)
+        manual_layout.addWidget(QLabel("Дата и время:"))
+        self.manual_datetime = QDateTimeEdit(QDateTime.currentDateTime())
+        self.manual_datetime.setCalendarPopup(True)
+        self.manual_datetime.setDisplayFormat("dd.MM.yyyy HH:mm")
+        manual_layout.addWidget(self.manual_datetime)
+        self.manual_mark_button = QPushButton("Поставить отметку")
+        self.manual_mark_button.clicked.connect(self._mark_selected_student)
+        manual_layout.addWidget(self.manual_mark_button)
+        manual_layout.addStretch(1)
+        layout.addWidget(manual_group)
+
+        binding_group = QGroupBox("Привязка неизвестной карты")
+        binding_layout = QVBoxLayout(binding_group)
+        binding_controls = QHBoxLayout()
+        binding_controls.addWidget(QLabel("Карта:"))
+        self.pending_card_combo = QComboBox()
+        self.pending_card_combo.setMinimumWidth(180)
+        binding_controls.addWidget(self.pending_card_combo)
+        self.bind_card_button = QPushButton("Привязать к выбранному студенту")
+        self.bind_card_button.clicked.connect(self._bind_card_to_selected_student)
+        binding_controls.addWidget(self.bind_card_button)
+        binding_controls.addStretch(1)
+        binding_layout.addLayout(binding_controls)
+        self.pending_cards_label = QLabel("Нет непривязанных карт в текущем сеансе")
+        binding_layout.addWidget(self.pending_cards_label)
+        layout.addWidget(binding_group)
+        self._refresh_pending_cards()
+        return page
+
     @staticmethod
     def _metric(layout: QHBoxLayout, value: str, label: str) -> QLabel:
         frame = QGroupBox(label.capitalize())
@@ -262,6 +318,9 @@ class AttendanceWindow(QMainWindow):
         elif index == 2:
             self.page_subtitle.setText(self._date_text(self.date_edit.date().toPyDate()))
             self._refresh_report()
+        elif index == 3:
+            self.page_subtitle.setText(self._date_text(date.today()))
+            self._refresh_today()
 
     def _load_subjects(self) -> None:
         self.folders = discover_subjects(self.tables_path)
@@ -288,6 +347,8 @@ class AttendanceWindow(QMainWindow):
         if index < 0 or index >= len(self.folders):
             return
         folder = self.folders[index]
+        self.pending_cards.clear()
+        self._refresh_pending_cards()
         self.session_subject.setText(folder.name)
         self._import_roster(folder)
         self._refresh_today()
@@ -368,6 +429,13 @@ class AttendanceWindow(QMainWindow):
             name = "Карта не привязана"
             meta = f"{result.code.canonical} · {result.at:%H:%M}"
             chip = "Неизвестная карта"
+            if result.code.canonical not in self.pending_cards:
+                self.pending_cards.append(result.code.canonical)
+                self._refresh_pending_cards()
+            self.statusBar().showMessage(
+                "Карта не привязана. Выберите студента на вкладке «Студенты и карты».",
+                10_000,
+            )
         else:
             name = result.student.full_name
             meta = f"Группа {result.student.group_name or 'не указана'} · {result.at:%H:%M}"
@@ -427,6 +495,8 @@ class AttendanceWindow(QMainWindow):
             self.statusBar().showMessage(f"Не удалось обновить отчёт: {exc}", 7000)
             return
         snapshot = self.today_snapshot
+        self.pending_cards = list(snapshot.unknown_cards)
+        self._refresh_pending_cards()
         self.present_value.setText(str(snapshot.present))
         self.late_value.setText(str(len(snapshot.late)))
         self.absent_value.setText(str(snapshot.absent))
@@ -448,6 +518,7 @@ class AttendanceWindow(QMainWindow):
             item = QListWidgetItem("Отметок сегодня пока нет")
             item.setForeground(QColor("#7b8698"))
             self.recent_list.addItem(item)
+        self._render_students()
 
     def _report_date_changed(self, value: QDate) -> None:
         self.page_subtitle.setText(self._date_text(value.toPyDate()))
@@ -544,6 +615,167 @@ class AttendanceWindow(QMainWindow):
         self.random_button.setText(
             "Выбрать заново" if len(self.report_snapshot.late) > 10 else "Показаны все"
         )
+
+    # ------------------------------------------------------ students and cards
+
+    def _render_students(self) -> None:
+        if not hasattr(self, "students_table"):
+            return
+        rows = list(self.today_snapshot.rows)
+        self.students_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = (
+                row.student.full_name,
+                row.student.group_name,
+                row.student.card_code or "Не привязана",
+                row.at.strftime("%H:%M") if row.at else "Нет",
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.UserRole, row.student.id)
+                self.students_table.setItem(row_index, column, item)
+        self.students_table.resizeRowsToContents()
+        has_students = bool(rows)
+        self.manual_mark_button.setEnabled(has_students)
+        self.bind_card_button.setEnabled(has_students and bool(self.pending_cards))
+
+    def _selected_student(self) -> Student | None:
+        selected = self.students_table.selectionModel().selectedRows()
+        if not selected:
+            QMessageBox.information(
+                self,
+                "Студент не выбран",
+                "Сначала выберите строку студента в таблице.",
+            )
+            return None
+        student_id = self.students_table.item(selected[0].row(), 0).data(Qt.UserRole)
+        return next(
+            (row.student for row in self.today_snapshot.rows if row.student.id == student_id),
+            None,
+        )
+
+    def _mark_selected_student(self) -> None:
+        student = self._selected_student()
+        folder = self._current_folder()
+        if student is None or folder is None:
+            return
+        at = self.manual_datetime.dateTime().toPyDateTime()
+        try:
+            with Storage(self.db_path) as storage:
+                subject = storage.get_or_create_subject(folder.name)
+                current = storage.student_by_name(student.full_name, student.group_name)
+                if current is None:
+                    raise ValueError("студент не найден в базе")
+                result = storage.import_mark(
+                    current,
+                    subject,
+                    at,
+                    raw="GUI: ручная отметка",
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "Отметка не сохранена", str(exc))
+            return
+
+        messages = {
+            ImportStatus.ADDED: "Отметка сохранена.",
+            ImportStatus.SAME: "У студента уже есть такая отметка.",
+            ImportStatus.KEPT: "Студент уже был отмечен; сохранено прежнее время.",
+            ImportStatus.UPDATED: "Время отметки обновлено.",
+        }
+        self.statusBar().showMessage(messages[result], 7000)
+        if not self._scanning_active():
+            self._export_subject_now(folder)
+        self.date_edit.setDate(QDate(at.year, at.month, at.day))
+        self._refresh_today()
+        self._refresh_report()
+
+    def _bind_card_to_selected_student(self) -> None:
+        student = self._selected_student()
+        code = self.pending_card_combo.currentText()
+        if student is None or not code:
+            if not code:
+                QMessageBox.information(
+                    self,
+                    "Нет карты",
+                    "Сначала отсканируйте непривязанную карту.",
+                )
+            return
+        if student.card_code is not None:
+            QMessageBox.warning(
+                self,
+                "Карта уже привязана",
+                f"У студента уже есть карта {student.card_code}.",
+            )
+            return
+        try:
+            with Storage(self.db_path) as storage:
+                saved, credited = storage.bind_card(
+                    code,
+                    student.full_name,
+                    student.group_name,
+                )
+        except CardConflict as exc:
+            QMessageBox.warning(self, "Не удалось привязать карту", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.warning(self, "Не удалось привязать карту", str(exc))
+            return
+
+        self.pending_cards.remove(code)
+        self._refresh_pending_cards()
+        self.person_name.setText(saved.full_name)
+        self.person_meta.setText(f"Группа {saved.group_name} · карта {saved.card_code}")
+        self.scan_status_chip.setText("Карта привязана, отметка сохранена")
+        self.statusBar().showMessage(
+            f"Карта привязана. Именных отметок зачтено: {credited}.",
+            8000,
+        )
+        folder = self._current_folder()
+        if folder is not None and not self._scanning_active():
+            self._export_subject_now(folder)
+        self._refresh_today()
+        self._refresh_report()
+
+    def _refresh_pending_cards(self) -> None:
+        if not hasattr(self, "pending_card_combo"):
+            return
+        selected = self.pending_card_combo.currentText()
+        self.pending_card_combo.clear()
+        self.pending_card_combo.addItems(self.pending_cards)
+        if selected in self.pending_cards:
+            self.pending_card_combo.setCurrentText(selected)
+        count = len(self.pending_cards)
+        self.pending_cards_label.setText(
+            f"Ожидают привязки: {count}"
+            if count
+            else "Нет непривязанных карт в текущем сеансе"
+        )
+        has_students = bool(self.today_snapshot.rows)
+        self.bind_card_button.setEnabled(has_students and count > 0)
+
+    def _scanning_active(self) -> bool:
+        return self.scan_thread is not None and self.scan_thread.isRunning()
+
+    def _export_subject_now(self, folder: SubjectFolder) -> None:
+        try:
+            with Storage(self.db_path) as storage:
+                subject = storage.find_subject(folder.name)
+                if subject is None:
+                    return
+                results = fill_subject(storage, subject, folder)
+        except Exception as exc:
+            self.statusBar().showMessage(
+                f"Отметка в базе сохранена, но таблица не обновлена: {exc}",
+                10_000,
+            )
+            return
+        errors = [result for result in results if not result.ok]
+        if errors:
+            self.statusBar().showMessage(
+                "Отметка в базе сохранена, но один или несколько файлов Excel "
+                "не обновлены. Закройте их в Excel и повторите экспорт.",
+                10_000,
+            )
 
     # ------------------------------------------------------------------ helpers
 
