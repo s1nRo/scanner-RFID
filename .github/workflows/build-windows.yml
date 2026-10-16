@@ -47,10 +47,22 @@ jobs:
             --collect-all openpyxl `
             windows_launcher.py
 
-      - name: Upload executable
+      - name: Prepare portable package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package/data | Out-Null
+          New-Item -ItemType Directory -Force package/tables | Out-Null
+          Copy-Item dist/RFID-Scanner.exe package/RFID-Scanner.exe
+          Copy-Item WINDOWS-README.txt package/README.txt
+          Set-Content package/data/PLACE_DATABASE_HERE.txt `
+            "The application creates attendance.db here."
+          Set-Content package/tables/PLACE_SUBJECT_FOLDERS_HERE.txt `
+            "Put subject folders with .xlsx group lists here."
+
+      - name: Upload portable package
         uses: actions/upload-artifact@v4
         with:
           name: RFID-Scanner-Windows
-          path: dist/RFID-Scanner.exe
+          path: package/
           if-no-files-found: error
           retention-days: 30
