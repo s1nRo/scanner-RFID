@@ -64,12 +64,20 @@ jobs:
           Pop-Location
           exit 0
 
-      - name: Upload executables
+      # Пустых data\ и tables\ в комплекте нарочно нет: распакованный
+      # в новое место, exe принял бы их за рабочую папку и завёл бы там
+      # пустую базу мимо настоящей. Без них он ищет папку или спрашивает её.
+      - name: Prepare package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item dist/RFID-Scanner.exe, dist/rfid.exe package/
+          Copy-Item WINDOWS-README.txt package/README.txt
+
+      - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: RFID-Scanner-Windows
-          path: |
-            dist/rfid.exe
-            dist/RFID-Scanner.exe
+          path: package/
           if-no-files-found: error
           retention-days: 30

@@ -14,6 +14,9 @@
                                и тоже только если в ней есть data/ или tables/:
                                exe в папке программы работает с её данными
     4. текущая папка           только если в ней уже есть data/ или tables/
+                               (у exe не смотрится: он ищет данные у себя)
+    5. выбранная в окне        папка, которую человек указал в RFID-Scanner.exe
+                               кнопкой «Папка данных…» (rfid.workdir)
 
 Относительные --db и --tables считаются от рабочей папки, а не от текущей.
 """
@@ -24,11 +27,11 @@ import os
 import sys
 from pathlib import Path
 
+from .. import workdir
+from ..workdir import DB_FILE, TABLES_DIR, looks_like_home
 from .common import Interrupted
 
 HOME_ENV = "RFID_HOME"
-DB_FILE = Path("data") / "attendance.db"
-TABLES_DIR = Path("tables")
 
 
 def find_home(explicit: str | Path | None = None) -> Path | None:
@@ -38,17 +41,16 @@ def find_home(explicit: str | Path | None = None) -> Path | None:
     from_env = os.environ.get(HOME_ENV)
     if from_env:
         return _existing(Path(from_env), HOME_ENV)
+    # Рядом с собой — только похожая на рабочую папка. exe, запущенный
+    # из «Загрузок», не должен завести там пустую базу.
     if getattr(sys, "frozen", False):
-        # Только папка самого exe и только похожая на рабочую. exe, запущенный
-        # из «Загрузок», не должен завести там пустую базу.
-        exe_folder = Path(sys.executable).resolve().parent
-        return exe_folder if _looks_like_home(exe_folder) else None
-    cwd = Path.cwd()
-    return cwd.resolve() if _looks_like_home(cwd) else None
-
-
-def _looks_like_home(folder: Path) -> bool:
-    return (folder / DB_FILE.parent).is_dir() or (folder / TABLES_DIR).is_dir()
+        beside = Path(sys.executable).resolve().parent
+    else:
+        beside = Path.cwd().resolve()
+    if looks_like_home(beside):
+        return beside
+    # Через модуль, а не импортом имени: тесты подменяют память о папке.
+    return workdir.remembered()
 
 
 def _existing(path: Path, source: str) -> Path:

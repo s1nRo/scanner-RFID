@@ -44,7 +44,7 @@ from .. import pipeline, scanner
 from . import common
 from .admin import cmd_doctor, cmd_ports, cmd_reset
 from .common import EXIT_WORDS, Cancelled, Interrupted
-from .home import DB_FILE, HOME_ENV, TABLES_DIR, guard_mock, resolve_paths
+from .home import DB_FILE, HOME_ENV, TABLES_DIR, find_home, guard_mock, resolve_paths
 from .marking import cmd_enroll, cmd_scan, cmd_whois
 from .reports import cmd_late, cmd_report, cmd_students, cmd_subjects, cmd_unknown
 from .tables import cmd_export, cmd_import
@@ -129,11 +129,22 @@ def cmd_menu(args) -> int:
 
 
 def cmd_gui(args) -> int:
-    """Запустить графический интерфейс, не загружая PyQt5 для обычного CLI."""
-    guard_mock(args)
+    """Запустить графический интерфейс, не загружая PyQt5 для обычного CLI.
+
+    Рабочую папку окно ищет само (needs_home=False): консоль при неудаче
+    отказывает, а окно спрашивает папку — человек, запустивший exe двойным
+    щелчком, консольного отказа просто не увидит.
+    """
     try:
-        from ..gui import run_gui
-        return run_gui(args.db, args.tables, mode=args.mode, port=args.port)
+        from .. import gui
+
+        if args.home is None and find_home() is None:
+            args.home = gui.ask_home()
+            if args.home is None:
+                return 1  # отказался выбирать — молча, это не ошибка
+        resolve_paths(args)
+        guard_mock(args)
+        return gui.run_gui(args.db, args.tables, mode=args.mode, port=args.port)
     except ImportError as exc:
         if exc.name and exc.name.startswith("PyQt5"):
             # В rfid.exe окна нет нарочно: оно собрано отдельно, в rfid-gui.exe.
@@ -183,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="незнакомую карту сразу привязать к студенту из списка")
 
     gui = command("gui", cmd_gui, "графический интерфейс")
+    gui.set_defaults(needs_home=False)  # папку ищет cmd_gui, при неудаче — спрашивает
     # Ручной режим читает stdin и для оконного приложения непригоден.
     gui.add_argument("--mode", choices=("auto", "serial", "mock"), default="auto")
     gui.add_argument("--port", help="COM-порт, если автопоиск не сработал")

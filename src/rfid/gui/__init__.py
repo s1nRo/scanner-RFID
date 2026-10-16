@@ -19,4 +19,11 @@ def run_gui(
     return start(db_path, tables_path, mode=mode, port=port)
 
 
-__all__ = ["run_gui"]
+def ask_home() -> Path | None:
+    """Окно выбора рабочей папки, когда её не нашли. None — человек отказался."""
+    from .app import ask_home as ask
+
+    return ask()
+
+
+__all__ = ["ask_home", "run_gui"]

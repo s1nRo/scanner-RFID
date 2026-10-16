@@ -134,6 +134,7 @@ No card\r\n                        ← карта убрана
 | `src/rfid/scanner/` | **всё о считывателе**: `codes` (строка → код карты), `ports` (поиск COM-порта), `base` (`Scan`, `CardReader`), `serial_reader` (COM-порт, переподключение), `manual` (ручной ввод и заглушка), `factory` (`make_reader` по режиму) |
 | `src/rfid/excel/` | **всё о файлах групп**: `folders` (предметы = папки), `roster` (разбор списка), `cells` (время, прочерк, дата в заголовке), `attendance` (чтение и запись отметок), `save` (атомарная запись) |
 | `src/rfid/names.py` | `normalize_name` — общее правило сравнения ФИО, без зависимостей |
+| `src/rfid/workdir.py` | рабочая папка: `DB_FILE`, `TABLES_DIR`, `looks_like_home`, память о выбранной в окне папке (реестр). Без зависимостей — общее для `cli` и `gui` |
 | `src/rfid/lessons.py` | расписание, начала занятий, опоздания (`is_late`, `late_arrivals`) |
 | `src/rfid/db/` | **база, источник истины**: `models` (`Student`, `Subject`, `MarkResult`, статусы, `CardConflict`), `schema` (DDL, миграции 1 → 2 → 3, `_repair_orphan_marks`), `storage` (`Storage`: соединение, все запросы, транзакции, очистка) |
 | `src/rfid/pipeline.py` | связка считыватель → база → вывод, дебаунс |
@@ -141,7 +142,7 @@ No card\r\n                        ← карта убрана
 | `tables/<Предмет>/` | **папка = предмет**, внутри списки групп пользователя |
 | `src/rfid/cli/` | подкоманды: `common` (ввод, `confirm`, `pick`), `subjects`, `marking` (scan/enroll/whois), `reports`, `tables` (export/import), `admin` (doctor/ports/reset), `view` (вывод отметок: цвет, звук), `keys` (клавиша выхода); меню и разбор аргументов — `__init__` |
 | `rfid.cmd` | запуск. Ставит `RFID_HOME` = своя папка. **Только ASCII**, CRLF (`.gitattributes`) |
-| `src/rfid/gui/` | окно на PyQt5 (коллега, PR #2 и #3), реализует `pipeline.View`. Запуск — `rfid gui` / `rfid-gui.cmd` |
+| `src/rfid/gui/` | окно на PyQt5 (коллега, PR #2–#4), реализует `pipeline.View`. Запуск — `rfid gui` / `rfid-gui.cmd` |
 | `packaging/` | точки входа exe: `rfid_console.py` → `rfid.exe`, `rfid_gui.py` → `RFID-Scanner.exe`. Обе идут через `rfid.cli.main` |
 | `build-exe.cmd` | сборка обоих exe PyInstaller'ом на обычном Windows Python (`build-venv\`); CI зовёт его же с `BUILD_PY` |
 | `.github/workflows/build-windows.yml` | тесты, сборка, проверка exe в своей и в чужой папке, артефакт `RFID-Scanner-Windows` |
@@ -306,14 +307,26 @@ No card\r\n                        ← карта убрана
   после установки пакета `rfid` запускается откуда угодно и тихо завёл бы
   пустую базу в чужой папке — отметки ушли бы мимо журнала. Относительные
   `--db`/`--tables` — от рабочей папки. `guard_mock` сравнивает resolved-пути.
-- **exe ищет данные рядом с собой и только там** (16.10.2026). Шаг
-  поиска рабочей папки для `sys.frozen`: папка exe, если в ней есть
-  `data/` или `tables/`, иначе отказ. Текущая папка для exe не смотрится.
-  Обе точки входа идут через `rfid.cli.main`, своей логики путей у них
-  нет. У оконного exe консоли нет, поэтому `packaging/rfid_gui.py`
-  перехватывает вывод и показывает отказ окном (признак — `sys.frozen`,
-  а НЕ `sys.stdout is None`: в собранном exe второе не срабатывает).
-  PyQt5 исключён из `rfid.exe` (10 МБ вместо 40).
+- **Рабочая папка у окна и консоли одна** (16.10.2026, свели PR #4
+  коллеги и мой #5 по решению пользователя «объединить»). Поиск — только
+  `cli.home.find_home`: `--home`, `RFID_HOME`, рядом с собой (у exe — его
+  папка, иначе текущая; только если есть `data/` или `tables/`), затем
+  папка, выбранная в окне (`workdir.remembered`). Память в реестре
+  `HKCU\Software\RFID Attendance\RFID Journal\workspace`, значение `home` —
+  ровно там, где её писал QSettings в PR #4 (проверено пробным ключом),
+  но через `winreg`: `rfid.exe` собран без PyQt5 и должен её видеть.
+  Запомненная папка без `data/` и `tables/` не принимается.
+  - Нет папки: консоль отказывает, окно (`cmd_gui`, `needs_home=False`)
+    спрашивает её (`gui.ask_home`). Новую пустую — только с согласия.
+  - Пустых `data/` и `tables/` в комплекте exe быть НЕ должно: в новом
+    месте exe принял бы их за рабочую папку.
+  - Обе точки входа (`packaging/`) идут через `rfid.cli.main`. У оконного
+    exe консоли нет: `packaging/rfid_gui.py` перехватывает вывод и
+    показывает отказ окном (признак — `sys.frozen`, а НЕ
+    `sys.stdout is None`: в собранном exe второе не срабатывает).
+  - `tests/conftest.py` глушит `workdir.remembered` во всех тестах: на
+    машине разработчика там записана живая рабочая папка.
+  - PyQt5 исключён из `rfid.exe` (10 МБ вместо 40).
 - **src-раскладка и установка — потому что программу раздают** (решение
   пользователя 25.09.2026). Раздача — архив «Source code» релиза GitHub;
   `.gitattributes` выкидывает из него `tests/` и служебное. Получатель
@@ -454,7 +467,7 @@ No card\r\n                        ← карта убрана
 ## Состояние
 
 Сделано: драйвер (`COM3`), формат подтверждён на двух картах, ядро написано
-и покрыто тестами (`pytest` — 348 проходят), CLI работает. pyright и
+и покрыто тестами (`pytest` — 358 проходят), CLI работает. pyright и
 `uvx ruff check` — без замечаний, держать так. Исключение — 4 ошибки
 «PyQt5 не найден» в `gui/`: в MSYS-venv PyQt5 не ставится. Тесты GUI
 прогоняются в `build-venv\` (обычный Windows Python) и в CI.

@@ -74,6 +74,18 @@ class TestFindHome:
         monkeypatch.chdir(workdir)
         assert H.find_home() is None
 
+    def test_folder_chosen_in_the_window(self, workdir, stranger, monkeypatch):
+        # Папка, выбранная в RFID-Scanner.exe, видна и консоли: база одна.
+        monkeypatch.setattr(H.workdir, "remembered", lambda: workdir.resolve())
+        assert H.find_home() == workdir.resolve()
+
+    def test_folder_beside_beats_the_chosen_one(self, workdir, tmp_path, monkeypatch):
+        other = tmp_path / "другая"
+        (other / "data").mkdir(parents=True)
+        monkeypatch.setattr(H.workdir, "remembered", lambda: other)
+        monkeypatch.chdir(workdir)
+        assert H.find_home() == workdir.resolve()
+
     def test_env_variable_beats_exe_folder(self, workdir, tmp_path, monkeypatch):
         monkeypatch.setattr(H.sys, "frozen", True, raising=False)
         monkeypatch.setattr(H.sys, "executable", str(tmp_path / "rfid.exe"))

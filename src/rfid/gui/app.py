@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import shutil
+import stat
 import sys
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 
-from PyQt5.QtCore import QDate, QDateTime, Qt, QThread
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import QDate, QDateTime, Qt, QThread, QUrl
+from PyQt5.QtGui import QColor, QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
     QDateEdit,
     QDateTimeEdit,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -31,9 +35,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .. import workdir
 from ..db import CardConflict, ImportStatus, MarkResult, MarkStatus, Storage, Student
-from ..excel import SubjectFolder, discover_subjects
+from ..excel import RosterError, SubjectFolder, discover_subjects, read_roster
 from ..journal import fill_subject, import_subject
+from ..workdir import DB_FILE, TABLES_DIR
 from .data import AttendanceSnapshot, choose_random_late, load_snapshot
 from .worker import ScanWorker
 
@@ -107,6 +113,10 @@ class AttendanceWindow(QMainWindow):
         layout.addWidget(self.reader_title)
         layout.addWidget(QLabel("—"))
         layout.addWidget(self.reader_detail)
+        self.workspace_button = QPushButton("Папка данных…")
+        self.workspace_button.setToolTip(str(self.tables_path.parent))
+        self.workspace_button.clicked.connect(self._choose_workspace)
+        layout.addWidget(self.workspace_button)
         return bar
 
     def _build_scan_page(self) -> QWidget:
@@ -250,6 +260,25 @@ class AttendanceWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
+        roster_controls = QHBoxLayout()
+        roster_controls.addWidget(QLabel("Таблица группы:"))
+        self.roster_file_combo = QComboBox()
+        self.roster_file_combo.setMinimumWidth(260)
+        roster_controls.addWidget(self.roster_file_combo, 1)
+        self.view_roster_button = QPushButton("Просмотр в Excel")
+        self.view_roster_button.setToolTip(
+            "Открыть отдельную копию: рабочая таблица останется свободной для записи"
+        )
+        self.view_roster_button.clicked.connect(self._open_roster_readonly)
+        roster_controls.addWidget(self.view_roster_button)
+        self.edit_roster_button = QPushButton("Редактировать в Excel")
+        self.edit_roster_button.clicked.connect(self._open_roster_for_editing)
+        roster_controls.addWidget(self.edit_roster_button)
+        self.reload_roster_button = QPushButton("Загрузить изменения")
+        self.reload_roster_button.clicked.connect(self._reload_rosters)
+        roster_controls.addWidget(self.reload_roster_button)
+        layout.addLayout(roster_controls)
+
         self.students_table = QTableWidget(0, 4)
         self.students_table.setHorizontalHeaderLabels(
             ("ФИО", "Группа", "Карта", "Отметка сегодня")
@@ -324,17 +353,24 @@ class AttendanceWindow(QMainWindow):
 
     def _load_subjects(self) -> None:
         self.folders = discover_subjects(self.tables_path)
+        self.workspace_button.setToolTip(str(self.tables_path.parent))
         self.subject_combo.blockSignals(True)
         self.subject_combo.clear()
+        self.subject_combo.setEnabled(True)
         for folder in self.folders:
             self.subject_combo.addItem(folder.name)
         self.subject_combo.blockSignals(False)
         enabled = bool(self.folders)
         self.scan_button.setEnabled(enabled)
         if enabled:
+            self.hero_title.setText("Готово к занятию")
+            self.hero_hint.setText(
+                "Нажмите «Начать сканирование», затем прикладывайте карты студентов."
+            )
             self.subject_combo.setCurrentIndex(0)
             self._subject_changed(0)
         else:
+            self._refresh_roster_files(None)
             self.subject_combo.addItem("Предметы не найдены")
             self.subject_combo.setEnabled(False)
             self.hero_title.setText("Нет списков групп")
@@ -347,12 +383,134 @@ class AttendanceWindow(QMainWindow):
         if index < 0 or index >= len(self.folders):
             return
         folder = self.folders[index]
+        self._refresh_roster_files(folder)
         self.pending_cards.clear()
         self._refresh_pending_cards()
         self.session_subject.setText(folder.name)
         self._import_roster(folder)
         self._refresh_today()
         self._refresh_report()
+
+    def _choose_workspace(self) -> None:
+        if self._scanning_active():
+            QMessageBox.information(
+                self,
+                "Сканирование запущено",
+                "Сначала остановите сканирование, затем смените папку данных.",
+            )
+            return
+        home = pick_home(self, self.tables_path.parent)
+        if home is None:
+            return
+        self.db_path = home / DB_FILE
+        self.tables_path = home / TABLES_DIR
+        self.pending_cards.clear()
+        self._load_subjects()
+        self.statusBar().showMessage(f"Папка данных: {home}", 8000)
+
+    def _refresh_roster_files(self, folder: SubjectFolder | None) -> None:
+        if not hasattr(self, "roster_file_combo"):
+            return
+        self.roster_file_combo.clear()
+        if folder is not None:
+            for path in folder.rosters:
+                try:
+                    group_name = read_roster(path).group_name
+                except (RosterError, OSError):
+                    group_name = path.stem
+                self.roster_file_combo.addItem(
+                    f"{group_name} — {path.name}", str(path)
+                )
+        enabled = self.roster_file_combo.count() > 0
+        self.roster_file_combo.setEnabled(enabled)
+        self.view_roster_button.setEnabled(enabled)
+        self.edit_roster_button.setEnabled(enabled)
+        self.reload_roster_button.setEnabled(folder is not None)
+
+    def _selected_roster_path(self) -> Path | None:
+        value = self.roster_file_combo.currentData()
+        return Path(value) if value else None
+
+    def _open_file(self, path: Path, title: str) -> bool:
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve()))):
+            return True
+        QMessageBox.warning(
+            self,
+            title,
+            "Windows не смог открыть файл. Проверьте, что Excel установлен "
+            "и связан с файлами .xlsx.",
+        )
+        return False
+
+    def _open_roster_readonly(self) -> None:
+        source = self._selected_roster_path()
+        if source is None:
+            return
+        try:
+            preview_dir = Path(tempfile.mkdtemp(prefix="rfid-roster-preview-"))
+            preview = preview_dir / f"Просмотр — {source.name}"
+            shutil.copy2(source, preview)
+            preview.chmod(stat.S_IREAD)
+        except OSError as exc:
+            QMessageBox.warning(self, "Не удалось открыть таблицу", str(exc))
+            return
+        if self._open_file(preview, "Не удалось открыть копию"):
+            self.statusBar().showMessage(
+                "Открыта копия для просмотра; рабочая таблица не заблокирована.",
+                8000,
+            )
+
+    def _open_roster_for_editing(self) -> None:
+        source = self._selected_roster_path()
+        if source is None:
+            return
+        if self._scanning_active():
+            QMessageBox.information(
+                self,
+                "Сканирование запущено",
+                "Остановите сканирование перед редактированием списка.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Редактировать рабочую таблицу?",
+            "Excel откроет оригинал файла. Можно добавить студента без карты — "
+            "после сохранения закройте Excel и нажмите «Загрузить изменения».\n\n"
+            "Не меняйте ФИО студента с уже привязанной картой: связь карты "
+            "хранится по ФИО. Для обычного просмотра используйте соседнюю кнопку.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        if self._open_file(source, "Не удалось открыть таблицу"):
+            self.statusBar().showMessage(
+                "После редактирования закройте Excel и нажмите «Загрузить изменения».",
+                12_000,
+            )
+
+    def _reload_rosters(self) -> None:
+        if self._scanning_active():
+            QMessageBox.information(
+                self,
+                "Сканирование запущено",
+                "Остановите сканирование перед загрузкой изменённого списка.",
+            )
+            return
+        subject_name = self.subject_combo.currentText()
+        refreshed = discover_subjects(self.tables_path)
+        folder = next((item for item in refreshed if item.name == subject_name), None)
+        if folder is None:
+            self._load_subjects()
+            return
+        self.folders = refreshed
+        self._refresh_roster_files(folder)
+        self._import_roster(folder)
+        self._refresh_today()
+        self._refresh_report()
+        self.statusBar().showMessage(
+            "Изменения загружены. Новые студенты добавлены без карты.", 8000
+        )
 
     def _import_roster(self, folder: SubjectFolder) -> None:
         """Добавить в БД людей и ручные отметки из таблиц без удаления данных."""
@@ -829,6 +987,65 @@ class AttendanceWindow(QMainWindow):
         event.accept()
 
 
+def pick_home(parent: QWidget | None, start: Path | None = None) -> Path | None:
+    """Спросить рабочую папку. Возвращает её или None, если человек передумал.
+
+    Новую пустую папку заводим только с явного согласия: молча созданная
+    база в случайном месте увела бы отметки мимо журнала.
+    """
+    selected = QFileDialog.getExistingDirectory(
+        parent,
+        "Выберите рабочую папку с data и tables",
+        str(start or Path.home()),
+    )
+    if not selected:
+        return None
+    home = Path(selected)
+    if home.name.casefold() in (TABLES_DIR.name, DB_FILE.parent.name):
+        home = home.parent  # выбрали саму tables или data — нужна папка над ней
+    if not workdir.looks_like_home(home):
+        answer = QMessageBox.question(
+            parent,
+            "Создать новую рабочую папку?",
+            f"В папке {home} нет data и tables, то есть нет ни базы, ни списков.\n\n"
+            "Если программа уже работала на этом компьютере, выберите ту папку, "
+            "где лежит rfid.cmd, — иначе отметки начнут писаться в новую пустую "
+            "базу.\n\nСоздать здесь новую рабочую папку?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return None
+        (home / DB_FILE.parent).mkdir(parents=True, exist_ok=True)
+        (home / TABLES_DIR).mkdir(parents=True, exist_ok=True)
+    home = home.resolve()
+    workdir.remember(home)
+    return home
+
+
+def ask_home() -> Path | None:
+    """Рабочая папка не нашлась: объяснить и предложить выбрать."""
+    _application()
+    QMessageBox.information(
+        None,
+        "RFID Журнал",
+        "Не найдена папка с данными программы (data и tables).\n\n"
+        "Укажите папку, где лежит rfid.cmd, — там база и списки групп. "
+        "Выбор запомнится, и окно, и консоль будут работать с ней.",
+    )
+    return pick_home(None)
+
+
+def _application() -> QApplication:
+    app = QApplication.instance()
+    if not isinstance(app, QApplication):
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        app = QApplication(sys.argv[:1])
+        app.setApplicationName("RFID Журнал")
+    return app
+
+
 def run_gui(
     db_path: str | Path,
     tables_path: str | Path,
@@ -836,12 +1053,7 @@ def run_gui(
     mode: str = "auto",
     port: str | None = None,
 ) -> int:
-    app = QApplication.instance()
-    if app is None:
-        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-        app = QApplication(sys.argv[:1])
-    app.setApplicationName("RFID Журнал")
+    app = _application()
     window = AttendanceWindow(Path(db_path), Path(tables_path), mode=mode, port=port)
     window.show()
     return app.exec_()

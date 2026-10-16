@@ -27,13 +27,33 @@ def _show_error(text: str) -> None:
         pass
 
 
+# Общие флаги rfid стоят до подкоманды, а exe их получает как есть:
+# RFID-Scanner.exe --home D:/rfid  ->  rfid --home D:/rfid gui
+_GLOBAL_FLAGS = ("--home", "--db", "--tables")
+
+
+def gui_argv(argv: list[str]) -> list[str]:
+    front: list[str] = []
+    rest: list[str] = []
+    items = iter(argv)
+    for item in items:
+        name = item.split("=", 1)[0]
+        if name in _GLOBAL_FLAGS:
+            front.append(item)
+            if "=" not in item:
+                front.append(next(items, ""))
+        else:
+            rest.append(item)
+    return [*front, "gui", *rest]
+
+
 def run(argv: list[str]) -> int:
     if not getattr(sys, "frozen", False):  # python packaging\rfid_gui.py — консоль есть
-        return main(["gui", *argv])
+        return main(gui_argv(argv))
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
         try:
-            code = main(["gui", *argv])
+            code = main(gui_argv(argv))
         except SystemExit as exc:  # argparse: неверные аргументы
             code = exc.code if isinstance(exc.code, int) else 1
     if code and captured.getvalue().strip():
