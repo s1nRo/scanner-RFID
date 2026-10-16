@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from openpyxl import load_workbook
-from openpyxl.worksheet._read_only import ReadOnlyWorksheet
 from openpyxl.worksheet.worksheet import Worksheet
 
 from ..names import normalize_name
@@ -68,13 +67,15 @@ class Roster:
 
 def read_roster(path: str | Path) -> Roster:
     path = Path(path)
-    # Просмотр состава группы не должен держать файл открытым или мешать
-    # преподавателю работать с ним в Excel. Потоковая книга закрывается
-    # сразу после извлечения нужных значений.
-    workbook = load_workbook(path, read_only=True)
+    # Обычный режим, НЕ read_only. Проверено 16.10.2026: read_only держит
+    # файл открытым до close() (Excel и os.replace получают отказ), а обычный
+    # отпускает его сразу после чтения. Вдобавок read_only на наших листах
+    # медленнее в 5 раз: каждый sheet.cell() заново разбирает лист с начала,
+    # и окно на каждом переключении вкладки подвисало.
+    workbook = load_workbook(path)
     try:
         sheet = workbook.active
-        if not isinstance(sheet, (Worksheet, ReadOnlyWorksheet)):
+        if not isinstance(sheet, Worksheet):
             raise RosterError(f"в {path.name} активный лист — не таблица")
 
         header_row, name_col = _detect_header(sheet)
@@ -104,20 +105,11 @@ def unmatched_names(roster: Roster, names: list[str]) -> list[str]:
     return [name for name in names if roster.find(name) is None]
 
 
-def _rows(sheet: Worksheet | ReadOnlyWorksheet) -> int:
-    """Число строк листа. В потоковом режиме openpyxl может не знать размер."""
-    return sheet.max_row or 0
-
-
-def _columns(sheet: Worksheet | ReadOnlyWorksheet) -> int:
-    return sheet.max_column or 0
-
-
-def _detect_header(sheet: Worksheet | ReadOnlyWorksheet) -> tuple[int, int]:
+def _detect_header(sheet: Worksheet) -> tuple[int, int]:
     """Найти строку шапки и колонку с ФИО."""
-    depth = min(_rows(sheet), _HEADER_SEARCH_DEPTH)
+    depth = min(sheet.max_row, _HEADER_SEARCH_DEPTH)
     for row in range(1, depth + 1):
-        for col in range(1, min(_columns(sheet), _SEARCH_WIDTH) + 1):
+        for col in range(1, min(sheet.max_column, _SEARCH_WIDTH) + 1):
             value = sheet.cell(row=row, column=col).value
             if isinstance(value, str) and _NAME_HEADER.search(value):
                 return row, col
@@ -125,11 +117,11 @@ def _detect_header(sheet: Worksheet | ReadOnlyWorksheet) -> tuple[int, int]:
 
 
 def _read_students(
-    sheet: Worksheet | ReadOnlyWorksheet, header_row: int, name_col: int
+    sheet: Worksheet, header_row: int, name_col: int
 ) -> list[RosterStudent]:
     students: list[RosterStudent] = []
     row = header_row + 1
-    while row <= _rows(sheet):
+    while row <= sheet.max_row:
         value = sheet.cell(row=row, column=name_col).value
         if value is None or not str(value).strip():
             break  # список кончился; ниже могут быть примечания
@@ -140,16 +132,16 @@ def _read_students(
     return students
 
 
-def _cells_above_header(sheet: Worksheet | ReadOnlyWorksheet, header_row: int):
+def _cells_above_header(sheet: Worksheet, header_row: int):
     for row in range(1, header_row):
-        for col in range(1, min(_columns(sheet), _SEARCH_WIDTH) + 1):
+        for col in range(1, min(sheet.max_column, _SEARCH_WIDTH) + 1):
             value = sheet.cell(row=row, column=col).value
             if isinstance(value, str) and value.strip():
                 yield value.strip()
 
 
 def _detect_group(
-    sheet: Worksheet | ReadOnlyWorksheet, header_row: int, fallback: str
+    sheet: Worksheet, header_row: int, fallback: str
 ) -> str:
     """Название группы из шапки файла.
 

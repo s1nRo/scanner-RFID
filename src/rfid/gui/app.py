@@ -37,10 +37,10 @@ from PyQt5.QtWidgets import (
 
 from .. import workdir
 from ..db import CardConflict, ImportStatus, MarkResult, MarkStatus, Storage, Student
-from ..excel import RosterError, SubjectFolder, discover_subjects, read_roster
+from ..excel import RosterError, SubjectFolder, discover_subjects
 from ..journal import fill_subject, import_subject
 from ..workdir import DB_FILE, TABLES_DIR
-from .data import AttendanceSnapshot, choose_random_late, load_snapshot
+from .data import AttendanceSnapshot, cached_roster, choose_random_late, load_snapshot
 from .worker import ScanWorker
 
 
@@ -415,7 +415,7 @@ class AttendanceWindow(QMainWindow):
         if folder is not None:
             for path in folder.rosters:
                 try:
-                    group_name = read_roster(path).group_name
+                    group_name = cached_roster(path).group_name
                 except (RosterError, OSError):
                     group_name = path.stem
                 self.roster_file_combo.addItem(

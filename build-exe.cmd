@@ -22,6 +22,10 @@ set "PY=build-venv\Scripts\python.exe"
 "%PY%" -m pip install --upgrade --quiet pip
 "%PY%" -m pip install --upgrade --quiet ".[gui]" "pyinstaller>=6.10"
 if errorlevel 1 exit /b 1
+REM The version number rarely changes between builds, and then pip keeps the
+REM previously installed copy: the exe would pack stale code. Always reinstall.
+"%PY%" -m pip install --quiet --force-reinstall --no-deps .
+if errorlevel 1 exit /b 1
 
 REM The console exe never opens the window, so PyQt5 stays out of it.
 "%PY%" -m PyInstaller --noconfirm --clean --onefile --console --name rfid --exclude-module PyQt5 ^

@@ -147,7 +147,9 @@ class FileMarks:
 def read_attendance(roster: Roster, today: date | None = None) -> FileMarks:
     """Прочитать уже проставленные в файле отметки."""
     today = today or date.today()
-    workbook = load_workbook(roster.path, read_only=True)
+    # Обычный режим, не read_only: тот держит файл до close() и здесь
+    # медленнее в 18 раз — см. read_roster.
+    workbook = load_workbook(roster.path)
     try:
         sheet = workbook[roster.sheet_title]
 

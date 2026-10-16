@@ -5,7 +5,7 @@ from random import Random
 
 from rfid.db import Storage, Student
 from rfid.gui.data import LateStudent, choose_random_late, load_snapshot
-from tests.helpers import card
+from tests.helpers import card, make_roster_file
 
 
 def at(hour: int, minute: int) -> datetime:
@@ -52,3 +52,25 @@ def test_random_late_returns_everyone_when_fewer_than_ten():
         for i in range(3)
     ]
     assert {item.student.id for item in choose_random_late(students, rng=Random(1))} == {0, 1, 2}
+
+
+def test_roster_is_read_once_until_the_file_changes(tmp_path, monkeypatch):
+    # Снимок строится на каждой вкладке и на каждую карту — файлы не перечитываем.
+    import os
+
+    from rfid import excel
+    from rfid.gui import data
+
+    path = make_roster_file(tmp_path / "group.xlsx")
+    reads: list[object] = []
+    real = excel.read_roster
+    monkeypatch.setattr(excel, "read_roster", lambda p: reads.append(p) or real(p))
+
+    first = data.cached_roster(path)
+    assert data.cached_roster(path) is first
+    assert len(reads) == 1
+
+    info = path.stat()
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    data.cached_roster(path)
+    assert len(reads) == 2  # файл изменился — перечитан
