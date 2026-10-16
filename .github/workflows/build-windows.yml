@@ -52,13 +52,16 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           $exe = (Resolve-Path dist\RFID-Scanner.exe).Path
+          # Запустить на 15 с. Вернуть $null, если ещё работает, иначе код выхода.
           function Run-For([string]$folder) {
             Copy-Item $exe $folder
             $p = Start-Process (Join-Path $folder "RFID-Scanner.exe") -PassThru
             Start-Sleep 15
-            $alive = -not $p.HasExited
-            taskkill /F /T /PID $p.Id | Out-Null
-            return $alive
+            if (-not $p.HasExited) {
+              taskkill /F /T /PID $p.Id | Out-Null
+              return $null
+            }
+            return $p.ExitCode
           }
 
           # Своя папка: список группы рядом — окно открывает базу именно здесь.
@@ -67,15 +70,20 @@ jobs:
           New-Item -ItemType Directory -Force $subject | Out-Null
           python -c "import sys; from pathlib import Path; from tests.helpers import make_roster_file; make_roster_file(Path(sys.argv[1]) / 'group.xlsx')" $subject
           Push-Location $env:RUNNER_TEMP
-          if (-not (Run-For $home_dir)) { throw "RFID-Scanner.exe упал в своей папке" }
+          $code = Run-For $home_dir
+          if ($null -ne $code) { throw "RFID-Scanner.exe закрылся в своей папке (код $code)" }
           if (-not (Test-Path (Join-Path $home_dir "data\attendance.db"))) {
             throw "RFID-Scanner.exe не открыл базу в своей папке"
           }
 
-          # Чужая папка: окно ждёт выбора папки и ничего здесь не создаёт.
+          # Чужая папка: exe спрашивает папку. Без экрана вопрос сразу
+          # возвращается как «отменено», и exe выходит с отказом (код 1) —
+          # или ждёт, если вопрос всё же показан. Главное: здесь ничего
+          # не создано, и он не «открылся» успешно с пустой базой.
           $stranger = Join-Path $env:RUNNER_TEMP "stranger"
           New-Item -ItemType Directory -Force $stranger | Out-Null
-          if (-not (Run-For $stranger)) { throw "RFID-Scanner.exe упал в чужой папке" }
+          $code = Run-For $stranger
+          if ($code -eq 0) { throw "RFID-Scanner.exe открылся в чужой папке без выбора" }
           if (Test-Path (Join-Path $stranger "data")) { throw "RFID-Scanner.exe завёл data в чужой папке" }
           if (Test-Path (Join-Path $stranger "tables")) { throw "RFID-Scanner.exe завёл tables в чужой папке" }
           Pop-Location
