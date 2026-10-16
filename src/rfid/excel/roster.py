@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.worksheet._read_only import ReadOnlyWorksheet
 from openpyxl.worksheet.worksheet import Worksheet
 
 from ..names import normalize_name
@@ -67,24 +68,31 @@ class Roster:
 
 def read_roster(path: str | Path) -> Roster:
     path = Path(path)
-    sheet = load_workbook(path).active
-    if not isinstance(sheet, Worksheet):
-        raise RosterError(f"в {path.name} активный лист — не таблица")
+    # Просмотр состава группы не должен держать файл открытым или мешать
+    # преподавателю работать с ним в Excel. Потоковая книга закрывается
+    # сразу после извлечения нужных значений.
+    workbook = load_workbook(path, read_only=True)
+    try:
+        sheet = workbook.active
+        if not isinstance(sheet, (Worksheet, ReadOnlyWorksheet)):
+            raise RosterError(f"в {path.name} активный лист — не таблица")
 
-    header_row, name_col = _detect_header(sheet)
-    students = _read_students(sheet, header_row, name_col)
-    if not students:
-        raise RosterError(f"в {path.name} не нашлось ни одного студента")
+        header_row, name_col = _detect_header(sheet)
+        students = _read_students(sheet, header_row, name_col)
+        if not students:
+            raise RosterError(f"в {path.name} не нашлось ни одного студента")
 
-    return Roster(
-        path=path,
-        sheet_title=sheet.title,
-        group_name=_detect_group(sheet, header_row, fallback=path.stem),
-        header_row=header_row,
-        name_col=name_col,
-        first_date_col=name_col + 1,
-        students=students,
-    )
+        return Roster(
+            path=path,
+            sheet_title=sheet.title,
+            group_name=_detect_group(sheet, header_row, fallback=path.stem),
+            header_row=header_row,
+            name_col=name_col,
+            first_date_col=name_col + 1,
+            students=students,
+        )
+    finally:
+        workbook.close()
 
 
 def unmatched_names(roster: Roster, names: list[str]) -> list[str]:
@@ -96,7 +104,7 @@ def unmatched_names(roster: Roster, names: list[str]) -> list[str]:
     return [name for name in names if roster.find(name) is None]
 
 
-def _detect_header(sheet: Worksheet) -> tuple[int, int]:
+def _detect_header(sheet: Worksheet | ReadOnlyWorksheet) -> tuple[int, int]:
     """Найти строку шапки и колонку с ФИО."""
     depth = min(sheet.max_row, _HEADER_SEARCH_DEPTH)
     for row in range(1, depth + 1):
@@ -107,7 +115,9 @@ def _detect_header(sheet: Worksheet) -> tuple[int, int]:
     raise RosterError("не нашёл шапку: нет ячейки со словом «ФИО»")
 
 
-def _read_students(sheet: Worksheet, header_row: int, name_col: int) -> list[RosterStudent]:
+def _read_students(
+    sheet: Worksheet | ReadOnlyWorksheet, header_row: int, name_col: int
+) -> list[RosterStudent]:
     students: list[RosterStudent] = []
     row = header_row + 1
     while row <= sheet.max_row:
@@ -121,7 +131,7 @@ def _read_students(sheet: Worksheet, header_row: int, name_col: int) -> list[Ros
     return students
 
 
-def _cells_above_header(sheet: Worksheet, header_row: int):
+def _cells_above_header(sheet: Worksheet | ReadOnlyWorksheet, header_row: int):
     for row in range(1, header_row):
         for col in range(1, min(sheet.max_column, _SEARCH_WIDTH) + 1):
             value = sheet.cell(row=row, column=col).value
@@ -129,7 +139,9 @@ def _cells_above_header(sheet: Worksheet, header_row: int):
                 yield value.strip()
 
 
-def _detect_group(sheet: Worksheet, header_row: int, fallback: str) -> str:
+def _detect_group(
+    sheet: Worksheet | ReadOnlyWorksheet, header_row: int, fallback: str
+) -> str:
     """Название группы из шапки файла.
 
     Три попытки по убыванию надёжности: явное «Группа X»; номер группы

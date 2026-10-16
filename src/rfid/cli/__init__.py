@@ -1,6 +1,7 @@
 """Командная строка.
 
     python -m rfid                  меню: спросит, что делать
+    python -m rfid gui              графический интерфейс
     python -m rfid enroll           привязать карты к студентам из списка
     python -m rfid scan             отмечать студентов
     python -m rfid scan --enroll    отмечать и сразу привязывать новые карты
@@ -51,7 +52,7 @@ __all__ = [
     "DB_FILE", "HOME_ENV", "MENU", "TABLES_DIR", "Cancelled", "Interrupted",
     "build_parser", "guard_mock", "main",
     "cmd_doctor", "cmd_enroll", "cmd_export", "cmd_import", "cmd_late", "cmd_menu",
-    "cmd_ports", "cmd_report", "cmd_reset", "cmd_scan", "cmd_students",
+    "cmd_gui", "cmd_ports", "cmd_report", "cmd_reset", "cmd_scan", "cmd_students",
     "cmd_subjects", "cmd_unknown", "cmd_whois",
 ]
 
@@ -126,6 +127,20 @@ def cmd_menu(args) -> int:
             return 0
 
 
+def cmd_gui(args) -> int:
+    """Запустить графический интерфейс, не загружая PyQt5 для обычного CLI."""
+    guard_mock(args)
+    try:
+        from ..gui import run_gui
+        return run_gui(args.db, args.tables, mode=args.mode, port=args.port)
+    except ImportError as exc:
+        if exc.name and exc.name.startswith("PyQt5"):
+            raise Interrupted(
+                "  Графический интерфейс не установлен. Запустите install.cmd ещё раз."
+            ) from None
+        raise
+
+
 # --------------------------------------------------------------------- разбор
 
 
@@ -164,6 +179,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="не трогать файлы групп при выходе")
     scan.add_argument("--enroll", action="store_true",
                       help="незнакомую карту сразу привязать к студенту из списка")
+
+    gui = command("gui", cmd_gui, "графический интерфейс")
+    # Ручной режим читает stdin и для оконного приложения непригоден.
+    gui.add_argument("--mode", choices=("auto", "serial", "mock"), default="auto")
+    gui.add_argument("--port", help="COM-порт, если автопоиск не сработал")
 
     enroll = command("enroll", cmd_enroll, "привязать карты к студентам из списка")
     _add_reader_flags(enroll)

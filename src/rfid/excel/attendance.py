@@ -42,38 +42,41 @@ def write_attendance(
     ФИО сверяются без учёта регистра и «ё». Имена, которых нет в списке,
     молча не теряются — их возвращает сверка через unmatched_names().
     """
-    workbook = load_workbook(roster.path)
-    sheet = workbook[roster.sheet_title]
+    workbook = load_workbook(roster.path, read_only=False)
+    try:
+        sheet = workbook[roster.sheet_title]
 
-    _unmerge_header(sheet, roster.header_row, roster.first_date_col)
-    columns = _date_columns(sheet, roster)
+        _unmerge_header(sheet, roster.header_row, roster.first_date_col)
+        columns = _date_columns(sheet, roster)
 
-    for day in sorted(marks):
-        column = columns.get(day.strftime(DATE_HEADER_FORMAT))
-        if column is None:
-            column = _add_date_column(sheet, roster, columns, day)
+        for day in sorted(marks):
+            column = columns.get(day.strftime(DATE_HEADER_FORMAT))
+            if column is None:
+                column = _add_date_column(sheet, roster, columns, day)
 
-        # Приходы сначала режутся на занятия — см. lessons.session_starts().
-        starts = session_starts(marks[day].values())
-        present = {normalize_name(name): at for name, at in marks[day].items()}
-        for student in roster.students:
-            at = present.get(normalize_name(student.full_name))
-            _free_cell(sheet, student.row, column)
-            cell = sheet.cell(row=student.row, column=column)
-            assert isinstance(cell, Cell), "объединение с ячейки снято выше"
-            if at is None and cell_time(cell.value) is not None:
-                # В файле что-то стоит, а в базе отметки нет: время, вписанное
-                # руками, или непонятное «+». Файл главнее — не затираем.
-                continue
-            cell.value = at.strftime(TIME_FORMAT) if at else absent_mark
-            cell.alignment = Alignment(horizontal="center")
-            if at is not None and is_late(at, starts):
-                cell.fill = LATE_FILL
-            elif cell.fill == LATE_FILL:
-                # Повторный экспорт должен снимать устаревшую подсветку.
-                cell.fill = PatternFill()
+            # Приходы сначала режутся на занятия — см. lessons.session_starts().
+            starts = session_starts(marks[day].values())
+            present = {normalize_name(name): at for name, at in marks[day].items()}
+            for student in roster.students:
+                at = present.get(normalize_name(student.full_name))
+                _free_cell(sheet, student.row, column)
+                cell = sheet.cell(row=student.row, column=column)
+                assert isinstance(cell, Cell), "объединение с ячейки снято выше"
+                if at is None and cell_time(cell.value) is not None:
+                    # В файле что-то стоит, а в базе отметки нет: время, вписанное
+                    # руками, или непонятное «+». Файл главнее — не затираем.
+                    continue
+                cell.value = at.strftime(TIME_FORMAT) if at else absent_mark
+                cell.alignment = Alignment(horizontal="center")
+                if at is not None and is_late(at, starts):
+                    cell.fill = LATE_FILL
+                elif cell.fill == LATE_FILL:
+                    # Повторный экспорт должен снимать устаревшую подсветку.
+                    cell.fill = PatternFill()
 
-    save_atomically(workbook, roster.path)
+        save_atomically(workbook, roster.path)
+    finally:
+        workbook.close()
     return roster.path
 
 
@@ -144,22 +147,28 @@ class FileMarks:
 def read_attendance(roster: Roster, today: date | None = None) -> FileMarks:
     """Прочитать уже проставленные в файле отметки."""
     today = today or date.today()
-    sheet = load_workbook(roster.path)[roster.sheet_title]
+    workbook = load_workbook(roster.path, read_only=True)
+    try:
+        sheet = workbook[roster.sheet_title]
 
-    marks: dict[date, list[tuple[RosterStudent, datetime]]] = {}
-    absent: dict[date, list[RosterStudent]] = {}
-    skipped: list[tuple[str, str]] = []
-    for col in range(roster.first_date_col, sheet.max_column + 1):
-        head = sheet.cell(row=roster.header_row, column=col).value
-        day = header_date(head, today)
-        if day is None:
-            continue  # не дата — чужая колонка, например «Примечание»
-        for student in roster.students:
-            value = cell_time(sheet.cell(row=student.row, column=col).value)
-            if value is None:
-                absent.setdefault(day, []).append(student)
-            elif isinstance(value, str):
-                skipped.append((f"{head}, {student.full_name}", value))
-            else:
-                marks.setdefault(day, []).append((student, datetime.combine(day, value)))
-    return FileMarks(marks, skipped, absent)
+        marks: dict[date, list[tuple[RosterStudent, datetime]]] = {}
+        absent: dict[date, list[RosterStudent]] = {}
+        skipped: list[tuple[str, str]] = []
+        for col in range(roster.first_date_col, sheet.max_column + 1):
+            head = sheet.cell(row=roster.header_row, column=col).value
+            day = header_date(head, today)
+            if day is None:
+                continue  # не дата — чужая колонка, например «Примечание»
+            for student in roster.students:
+                value = cell_time(sheet.cell(row=student.row, column=col).value)
+                if value is None:
+                    absent.setdefault(day, []).append(student)
+                elif isinstance(value, str):
+                    skipped.append((f"{head}, {student.full_name}", value))
+                else:
+                    marks.setdefault(day, []).append(
+                        (student, datetime.combine(day, value))
+                    )
+        return FileMarks(marks, skipped, absent)
+    finally:
+        workbook.close()
