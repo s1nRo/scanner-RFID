@@ -12,13 +12,16 @@ from .. import pipeline
 from ..db import MarkResult, Storage
 from ..excel import SubjectFolder
 from ..journal import fill_subject
-from ..scanner import ReaderUnavailable, make_reader
+from ..scanner import ReaderUnavailable, Scan, make_reader
+from .gate import ScanGate
 
 
 class ScanWorker(QObject):
     """Запускает блокирующий считыватель вне GUI-потока."""
 
     mark_received = pyqtSignal(object)
+    # Карту приложили, пока ждём привязки незнакомой, — не принята.
+    rejected = pyqtSignal(object)
     status_changed = pyqtSignal(str)
     failed = pyqtSignal(str)
     export_finished = pyqtSignal(str)
@@ -40,14 +43,28 @@ class ScanWorker(QObject):
         self.port = port
         self.debounce = debounce
         self._stop = Event()
+        self._gate: ScanGate | None = None
 
     def stop(self) -> None:
         self._stop.set()
+
+    def release(self) -> None:
+        """Незнакомую карту привязали или оставили без привязки — принимать дальше."""
+        if self._gate is not None:
+            self._gate.open()
+
+    def _reject(self, scan: Scan) -> None:
+        self.rejected.emit(scan)
 
     def status(self, message: str) -> None:
         self.status_changed.emit(message)
 
     def show(self, result: MarkResult) -> None:
+        # Заслонка закрывается здесь, в потоке считывателя, до чтения следующей
+        # карты: окно узнает о незнакомой с задержкой, и карта, приложенная
+        # в эти доли секунды, иначе проскочила бы мимо привязки.
+        if result.student is None and self._gate is not None:
+            self._gate.close()
         self.mark_received.emit(result)
 
     @pyqtSlot()
@@ -61,11 +78,12 @@ class ScanWorker(QObject):
                 should_stop=self._stop.is_set,
             )
             self.status_changed.emit(f"Считыватель подключён: {reader.description}")
+            self._gate = ScanGate(reader, self._reject)
             with Storage(self.db_path) as storage:
                 subject = storage.get_or_create_subject(self.folder.name)
                 try:
                     tally = pipeline.run(
-                        reader,
+                        self._gate,
                         storage,
                         self,
                         subject,
