@@ -56,21 +56,21 @@ class TestFindHome:
         assert H.find_home() == workdir.resolve()
 
     def test_exe_folder(self, workdir, stranger, monkeypatch):
-        # rfid.exe работает с data/ и tables/ рядом с собой, откуда его ни запусти.
+        # exe работает с data/ и tables/ рядом с собой, откуда его ни запусти.
         monkeypatch.setattr(H.sys, "frozen", True, raising=False)
-        monkeypatch.setattr(H.sys, "executable", str(workdir / "rfid.exe"))
+        monkeypatch.setattr(H.sys, "executable", str(workdir / "RFID-Scanner.exe"))
         assert H.find_home() == workdir.resolve()
 
     def test_exe_in_a_stranger_folder_finds_nothing(self, stranger, monkeypatch):
         # Запуск из «Загрузок» — не повод заводить там пустую базу.
         monkeypatch.setattr(H.sys, "frozen", True, raising=False)
-        monkeypatch.setattr(H.sys, "executable", str(stranger / "rfid.exe"))
+        monkeypatch.setattr(H.sys, "executable", str(stranger / "RFID-Scanner.exe"))
         assert H.find_home() is None
         assert "Рядом с программой" in H.no_home_explanation()
 
     def test_exe_ignores_current_folder(self, workdir, stranger, monkeypatch):
         monkeypatch.setattr(H.sys, "frozen", True, raising=False)
-        monkeypatch.setattr(H.sys, "executable", str(stranger / "rfid.exe"))
+        monkeypatch.setattr(H.sys, "executable", str(stranger / "RFID-Scanner.exe"))
         monkeypatch.chdir(workdir)
         assert H.find_home() is None
 
@@ -88,7 +88,7 @@ class TestFindHome:
 
     def test_env_variable_beats_exe_folder(self, workdir, tmp_path, monkeypatch):
         monkeypatch.setattr(H.sys, "frozen", True, raising=False)
-        monkeypatch.setattr(H.sys, "executable", str(tmp_path / "rfid.exe"))
+        monkeypatch.setattr(H.sys, "executable", str(tmp_path / "RFID-Scanner.exe"))
         monkeypatch.setenv(H.HOME_ENV, str(workdir))
         assert H.find_home() == workdir.resolve()
 

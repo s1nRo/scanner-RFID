@@ -37,7 +37,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from .. import pipeline, scanner
@@ -147,10 +146,9 @@ def cmd_gui(args) -> int:
         return gui.run_gui(args.db, args.tables, mode=args.mode, port=args.port)
     except ImportError as exc:
         if exc.name and exc.name.startswith("PyQt5"):
-            # В rfid.exe окна нет нарочно: оно собрано отдельно, в rfid-gui.exe.
-            hint = ("Запустите rfid-gui.exe." if getattr(sys, "frozen", False)
-                    else "Запустите install.cmd ещё раз.")
-            raise Interrupted(f"  Графический интерфейс не установлен. {hint}") from None
+            raise Interrupted(
+                "  Графический интерфейс не установлен. Запустите install.cmd ещё раз."
+            ) from None
         raise
 
 

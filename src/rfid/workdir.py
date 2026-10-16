@@ -8,7 +8,7 @@
 Память о выбранной папке лежит в реестре там же, где её хранил QSettings
 первой оконной сборки (HKCU\\Software\\RFID Attendance\\RFID Journal,
 ключ workspace, значение home): выбор, сделанный в ней, не теряется.
-PyQt5 для этого не нужен — rfid.exe собран без него.
+PyQt5 для этого не нужен: консоль (rfid.cmd) читает её без Qt.
 """
 
 from __future__ import annotations

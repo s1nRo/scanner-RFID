@@ -144,9 +144,9 @@ No card\r\n                        ← карта убрана
 | `src/rfid/cli/` | подкоманды: `common` (ввод, `confirm`, `pick`), `subjects`, `marking` (scan/enroll/whois), `reports`, `tables` (export/import), `admin` (doctor/ports/reset), `view` (вывод отметок: цвет, звук), `keys` (клавиша выхода); меню и разбор аргументов — `__init__` |
 | `rfid.cmd` | запуск. Ставит `RFID_HOME` = своя папка. **Только ASCII**, CRLF (`.gitattributes`) |
 | `src/rfid/gui/` | окно на PyQt5 (коллега, PR #2–#4), реализует `pipeline.View`. Запуск — `rfid gui` / `rfid-gui.cmd` |
-| `packaging/` | точки входа exe: `rfid_console.py` → `rfid.exe`, `rfid_gui.py` → `RFID-Scanner.exe`. Обе идут через `rfid.cli.main` |
-| `build-exe.cmd` | сборка обоих exe PyInstaller'ом на обычном Windows Python (`build-venv\`); CI зовёт его же с `BUILD_PY` |
-| `.github/workflows/build-windows.yml` | тесты, сборка, проверка exe в своей и в чужой папке, артефакт `RFID-Scanner-Windows` |
+| `packaging/` | точка входа exe: `rfid_gui.py` → `RFID-Scanner.exe`, идёт через `rfid.cli.main`. Консольного exe нет (решение пользователя 17.10.2026): консоль — `rfid.cmd` |
+| `build-exe.cmd` | сборка `RFID-Scanner.exe` PyInstaller'ом на обычном Windows Python (`build-venv\`); CI зовёт его же с `BUILD_PY` |
+| `.github/workflows/build-windows.yml` | тесты, сборка, запуск exe (offscreen) в своей и в чужой папке: база открыта у себя, в чужой не создано ничего, артефакт `RFID-Scanner-Windows` |
 | `install.cmd` | установка у получателя: venv, `pip install .`, `data\`, `tables\`, `doctor`. Повторный запуск — обновление |
 | `pyproject.toml` | метаданные, зависимости, `dev`-extra, команда `rfid`; настройки pytest, pyright, ruff |
 | `tests/data/reader_lines.txt` | реальные строки, закреплённые как фикстура |
@@ -342,7 +342,7 @@ No card\r\n                        ← карта убрана
   папка, выбранная в окне (`workdir.remembered`). Память в реестре
   `HKCU\Software\RFID Attendance\RFID Journal\workspace`, значение `home` —
   ровно там, где её писал QSettings в PR #4 (проверено пробным ключом),
-  но через `winreg`: `rfid.exe` собран без PyQt5 и должен её видеть.
+  но через `winreg`: консоль (`rfid.cmd`) должна её видеть без Qt.
   Запомненная папка без `data/` и `tables/` не принимается.
   - Нет папки: консоль отказывает, окно (`cmd_gui`, `needs_home=False`)
     спрашивает её (`gui.ask_home`). Новую пустую — только с согласия.
@@ -354,7 +354,6 @@ No card\r\n                        ← карта убрана
     `sys.stdout is None`: в собранном exe второе не срабатывает).
   - `tests/conftest.py` глушит `workdir.remembered` во всех тестах: на
     машине разработчика там записана живая рабочая папка.
-  - PyQt5 исключён из `rfid.exe` (10 МБ вместо 40).
 - **src-раскладка и установка — потому что программу раздают** (решение
   пользователя 25.09.2026). Раздача — архив «Source code» релиза GitHub;
   `.gitattributes` выкидывает из него `tests/` и служебное. Получатель

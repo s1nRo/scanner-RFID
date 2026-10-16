@@ -1,6 +1,6 @@
 @echo off
-REM Builds dist\rfid.exe (console menu, like rfid.cmd) and
-REM dist\RFID-Scanner.exe (window, like rfid-gui.cmd).
+REM Builds dist\RFID-Scanner.exe (window, like rfid-gui.cmd).
+REM There is no console exe on purpose: console commands go through rfid.cmd.
 REM Uses the regular Windows Python (py launcher), not the MSYS venv\:
 REM PyInstaller has no wheels for MSYS Python. Its own venv is build-venv\.
 REM CI sets BUILD_PY to its own python and skips the venv.
@@ -27,14 +27,10 @@ REM previously installed copy: the exe would pack stale code. Always reinstall.
 "%PY%" -m pip install --quiet --force-reinstall --no-deps .
 if errorlevel 1 exit /b 1
 
-REM The console exe never opens the window, so PyQt5 stays out of it.
-"%PY%" -m PyInstaller --noconfirm --clean --onefile --console --name rfid --exclude-module PyQt5 ^
-  --workpath build\pyinstaller --specpath build\pyinstaller packaging\rfid_console.py
-if errorlevel 1 exit /b 1
 "%PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --name RFID-Scanner ^
   --workpath build\pyinstaller --specpath build\pyinstaller packaging\rfid_gui.py
 if errorlevel 1 exit /b 1
 
 echo.
-echo Done: dist\rfid.exe and dist\RFID-Scanner.exe
-echo Put them into the program folder, next to data\ and tables\.
+echo Done: dist\RFID-Scanner.exe
+echo Put it into the program folder, next to data\ and tables\.
