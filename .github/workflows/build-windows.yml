@@ -48,15 +48,16 @@ jobs:
       - name: Smoke-test rfid.exe
         shell: pwsh
         run: |
+          $exe = (Resolve-Path dist\rfid.exe).Path
           $home_dir = Join-Path $env:RUNNER_TEMP "rfid-home"
           New-Item -ItemType Directory -Force (Join-Path $home_dir "tables") | Out-Null
-          Copy-Item dist\rfid.exe $home_dir
+          Copy-Item $exe $home_dir
           Push-Location $env:RUNNER_TEMP
           & (Join-Path $home_dir "rfid.exe") subjects
           if ($LASTEXITCODE -ne 0) { throw "rfid.exe не нашёл свою папку" }
           $stranger = Join-Path $env:RUNNER_TEMP "stranger"
           New-Item -ItemType Directory -Force $stranger | Out-Null
-          Copy-Item dist\rfid.exe $stranger
+          Copy-Item $exe $stranger
           & (Join-Path $stranger "rfid.exe") subjects
           if ($LASTEXITCODE -eq 0) { throw "rfid.exe принял чужую папку за рабочую" }
           if (Test-Path (Join-Path $stranger "data")) { throw "rfid.exe завёл data в чужой папке" }
