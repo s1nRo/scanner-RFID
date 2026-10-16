@@ -72,7 +72,17 @@ def read_roster(path: str | Path) -> Roster:
     # отпускает его сразу после чтения. Вдобавок read_only на наших листах
     # медленнее в 5 раз: каждый sheet.cell() заново разбирает лист с начала,
     # и окно на каждом переключении вкладки подвисало.
-    workbook = load_workbook(path)
+    try:
+        workbook = load_workbook(path)
+    except OSError:
+        raise  # нет доступа, открыт в Excel — у вызывающих на это свои сообщения
+    except Exception as exc:
+        # Пустой или битый .xlsx рядом со списками (BadZipFile и т. п.) — это
+        # «не список», а не авария: иначе один такой файл ронял enroll,
+        # меню 2 и подсчёт в окне. Пойман тестом 16.10.2026.
+        raise RosterError(
+            f"{path.name} не открывается как таблица Excel ({type(exc).__name__}: {exc})"
+        ) from exc
     try:
         sheet = workbook.active
         if not isinstance(sheet, Worksheet):

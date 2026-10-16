@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from ..db import Student
+from ..enrollment import Candidate
 from ..names import normalize_name
 from ..scanner import Scan
 
@@ -45,9 +45,10 @@ def error_beep() -> None:
 
 
 class BindDialog(QDialog):
-    """Кто приложил эту карту? Список — студенты предмета без карт."""
+    """Кто приложил эту карту? Список — студенты предмета без карт
+    (enrollment.without_card), с теми же сквозными номерами, что в консоли."""
 
-    def __init__(self, parent: QWidget | None, code: str, candidates: list[Student]):
+    def __init__(self, parent: QWidget | None, code: str, candidates: list[Candidate]):
         super().__init__(parent)
         self.setWindowTitle("Неизвестная карта")
         self.setModal(True)
@@ -76,14 +77,16 @@ class BindDialog(QDialog):
         layout.addWidget(self.rejected_label)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Поиск по ФИО или группе")
+        self.search.setPlaceholderText("Поиск по ФИО, группе или номеру")
         self.search.textChanged.connect(self._filter)
         layout.addWidget(self.search)
 
         self.list = QListWidget()
-        for student in candidates:
-            item = QListWidgetItem(f"{student.full_name} — {student.group_name}")
-            item.setData(Qt.UserRole, student.id)
+        for candidate in candidates:
+            item = QListWidgetItem(
+                f"{candidate.number:>3}. {candidate.full_name} — {candidate.group_name}"
+            )
+            item.setData(Qt.UserRole, candidate.number)
             self.list.addItem(item)
         self.list.itemDoubleClicked.connect(lambda _item: self.accept())
         self.list.currentItemChanged.connect(lambda *_: self._update_buttons())
@@ -102,12 +105,12 @@ class BindDialog(QDialog):
         self._update_buttons()
         self.search.setFocus()
 
-    def chosen(self) -> Student | None:
+    def chosen(self) -> Candidate | None:
         item = self.list.currentItem()
         if item is None or item.isHidden():
             return None
-        student_id = item.data(Qt.UserRole)
-        return next((s for s in self.candidates if s.id == student_id), None)
+        number = item.data(Qt.UserRole)
+        return next((c for c in self.candidates if c.number == number), None)
 
     def note_rejected(self, scan: Scan) -> None:
         """Пока ждали, приложили ещё карту — она не принята."""

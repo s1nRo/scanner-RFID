@@ -7,13 +7,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
-from .. import excel
+from .. import enrollment, excel
 from ..db import Storage
+from ..enrollment import Candidate
 from ..excel import SubjectFolder, discover_subjects, find_subject, misplaced_rosters
-from ..names import normalize_name
 from . import common
 from .common import Interrupted
 
@@ -91,47 +90,15 @@ def require_rosters(folder: SubjectFolder) -> None:
 # --------------------------------------------------------- сквозной список
 
 
-@dataclass(frozen=True)
-class Candidate:
-    """Строка сквозного списка: студент со своей группой."""
-
-    number: int
-    full_name: str
-    group_name: str
-
-
 def all_candidates(folder: SubjectFolder) -> list[Candidate]:
-    """Все студенты предмета одним списком со сквозной нумерацией.
-
-    Группу при привязке не спрашиваем: важен человек, а не то, в каком файле
-    он записан. Номера сквозные, поэтому ввод однозначен.
-    """
+    """Сквозной список предмета (enrollment.read_candidates) с отказами для консоли."""
     require_rosters(folder)
-    candidates: list[Candidate] = []
-    for path in folder.rosters:
-        try:
-            roster = excel.read_roster(path)
-        except excel.RosterError as exc:
-            print(f"  {path.name}: {exc}")
-            continue
-        for student in roster.students:
-            candidates.append(
-                Candidate(len(candidates) + 1, student.full_name, roster.group_name)
-            )
-    if not candidates:
+    found = enrollment.read_candidates(folder)
+    for path, problem in found.problems:
+        print(f"  {path.name}: {problem}")
+    if not found.items:
         raise Interrupted(f"  В «{folder.name}» не нашлось ни одного студента.")
-    return candidates
-
-
-def by_number(candidates: list[Candidate], choice: str) -> Candidate | None:
-    if not choice.isdigit():
-        return None
-    number = int(choice)
-    return next((c for c in candidates if c.number == number), None)
-
-
-def names_with_cards(storage: Storage) -> set[str]:
-    return {normalize_name(s.full_name) for s in storage.list_students(with_card=True)}
+    return found.items
 
 
 def print_candidates(
@@ -143,19 +110,15 @@ def print_candidates(
     приходится из них, и короткий список легче пробежать глазами. Номера
     остаются сквозными, как в полном списке.
     """
-    known = names_with_cards(storage)
+    known = enrollment.people_with_cards(storage)
     group = None
     print()
     for item in candidates:
-        if without_card_only and normalize_name(item.full_name) in known:
+        carded = enrollment.has_card(item, storage, known)
+        if without_card_only and carded:
             continue
         if item.group_name != group:
             group = item.group_name
             print(f"\n  {group}")
-        mark = "  карта есть" if normalize_name(item.full_name) in known else ""
+        mark = "  карта есть" if carded else ""
         print(f"    {item.number:>3}. {item.full_name:<38}{mark}")
-
-
-def bound_count(candidates: list[Candidate], storage: Storage) -> int:
-    known = names_with_cards(storage)
-    return sum(1 for c in candidates if normalize_name(c.full_name) in known)

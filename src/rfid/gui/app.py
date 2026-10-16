@@ -35,8 +35,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from .. import workdir
-from ..db import ImportStatus, MarkResult, MarkStatus, Storage, Student
+from .. import enrollment, workdir
+from ..db import CardConflict, ImportStatus, MarkResult, MarkStatus, Storage, Student
+from ..enrollment import Candidate
 from ..excel import RosterError, SubjectFolder, discover_subjects
 from ..journal import fill_subject, import_subject
 from ..workdir import DB_FILE, TABLES_DIR
@@ -622,8 +623,7 @@ class AttendanceWindow(QMainWindow):
         и откроется только здесь, в finally, — что бы ни случилось с окном.
         """
         try:
-            candidates = [row.student for row in self.today_snapshot.rows
-                          if row.student.card_code is None]
+            candidates = self._candidates_without_card()
             if not candidates:
                 self.statusBar().showMessage(
                     "У всех студентов предмета карта уже есть — эта, видимо, чужая. "
@@ -638,14 +638,15 @@ class AttendanceWindow(QMainWindow):
                     accepted = dialog.exec_() == BindDialog.Accepted
                 finally:
                     self.bind_dialog = None
-                student = dialog.chosen() if accepted else None
-                if student is None:
+                chosen = dialog.chosen() if accepted else None
+                if chosen is None:
                     self.statusBar().showMessage(
                         "Карта оставлена без привязки, отметка сохранена. "
                         "Привязать можно на вкладке «Студенты и карты».", 10_000,
                     )
                     return
-                saved = self._bind_code(result.code.canonical, student)
+                saved = self._bind_code(result.code.canonical, chosen.full_name,
+                                        chosen.group_name, includes_current=True)
                 if saved is not None:
                     self.person_name.setText(saved.full_name)
                     self.person_meta.setText(
@@ -681,24 +682,42 @@ class AttendanceWindow(QMainWindow):
             self.hero_title.setText("Сканирование запущено")
             self.hero_hint.setText("Приложите карту студента к считывателю")
 
-    def _bind_code(self, code: str, student: Student) -> Student | None:
-        """Привязать карту к студенту. Возвращает его или None, показав причину."""
+    def _candidates_without_card(self) -> list[Candidate]:
+        """Кому можно привязать карту — по тому же правилу, что в консоли."""
+        folder = self._current_folder()
+        if folder is None:
+            return []
+        found = enrollment.read_candidates(folder, read=cached_roster)
+        with Storage(self.db_path) as storage:
+            return enrollment.without_card(found.items, storage)
+
+    def _bind_code(
+        self, code: str, full_name: str, group_name: str, *, includes_current: bool
+    ) -> Student | None:
+        """Привязать карту (enrollment.bind). Возвращает студента или None, показав причину."""
         try:
             with Storage(self.db_path) as storage:
-                saved, credited = storage.bind_card(
-                    code, student.full_name, student.group_name
-                )
-        except Exception as exc:  # CardConflict и прочее — сказать, не терять
+                bound = enrollment.bind(storage, code, full_name, group_name,
+                                        includes_current=includes_current)
+        except CardConflict as exc:
+            QMessageBox.warning(
+                self, "Не удалось привязать карту",
+                f"Не привязано: {exc}. Сначала снимите старую карту "
+                f"(rfid students remove {exc.student.card_code}).",
+            )
+            return None
+        except Exception as exc:  # что угодно — сказать, не терять молча
             QMessageBox.warning(self, "Не удалось привязать карту", str(exc))
             return None
         if code in self.pending_cards:
             self.pending_cards.remove(code)
             self._refresh_pending_cards()
+        past = f" Прошлых отметок зачтено: {bound.past}." if bound.past > 0 else ""
         self.statusBar().showMessage(
-            f"Карта привязана: {saved.full_name}. Именных отметок зачтено: {credited}.",
+            f"Привязано: {bound.student.full_name} ({bound.student.group_name}).{past}",
             8000,
         )
-        return saved
+        return bound.student
 
     def _scan_status(self, message: str) -> None:
         self.reader_title.setText("Считыватель работает")
@@ -944,14 +963,8 @@ class AttendanceWindow(QMainWindow):
                     "Сначала отсканируйте непривязанную карту.",
                 )
             return
-        if student.card_code is not None:
-            QMessageBox.warning(
-                self,
-                "Карта уже привязана",
-                f"У студента уже есть карта {student.card_code}.",
-            )
-            return
-        saved = self._bind_code(code, student)
+        saved = self._bind_code(code, student.full_name, student.group_name,
+                                includes_current=False)
         if saved is None:
             return
         self.person_name.setText(saved.full_name)
