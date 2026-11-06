@@ -27,6 +27,11 @@ def _show_error(text: str) -> None:
         pass
 
 
+# Установка драйвера с флешки: окно перезапускает exe с правами
+# администратора (UAC) и этим флагом. Консоли нет — итог показываем окном.
+INSTALL_DRIVER = "--install-driver"
+
+
 # Общие флаги rfid стоят до подкоманды, а exe их получает как есть:
 # RFID-Scanner.exe --home D:/rfid  ->  rfid --home D:/rfid gui
 _GLOBAL_FLAGS = ("--home", "--db", "--tables")
@@ -48,16 +53,22 @@ def gui_argv(argv: list[str]) -> list[str]:
 
 
 def run(argv: list[str]) -> int:
+    if argv[:1] == [INSTALL_DRIVER]:
+        from rfid.scanner import driver
+
+        return driver.main(argv[1:])
+    command = gui_argv(argv)
     if not getattr(sys, "frozen", False):  # python packaging\rfid_gui.py — консоль есть
-        return main(gui_argv(argv))
+        return main(command)
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
         try:
-            code = main(gui_argv(argv))
+            code = main(command)
         except SystemExit as exc:  # argparse: неверные аргументы
             code = exc.code if isinstance(exc.code, int) else 1
-    if code and captured.getvalue().strip():
-        _show_error(captured.getvalue().strip())
+    text = captured.getvalue().strip()
+    if code and text:
+        _show_error(text)
     return code
 
 

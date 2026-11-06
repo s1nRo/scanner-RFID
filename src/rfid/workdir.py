@@ -19,6 +19,12 @@ from pathlib import Path
 DB_FILE = Path("data") / "attendance.db"
 TABLES_DIR = Path("tables")
 
+# Метка портабельной сборки (флешка). Лежит рядом с exe: тогда рабочая
+# папка — папка exe, даже пустая, а память о папке в реестр чужого
+# компьютера не пишется. Обычной раздаче её не кладут: там пустые data
+# и tables рядом с exe увели бы отметки мимо настоящей базы.
+PORTABLE_MARKER = "portable.txt"
+
 _REGISTRY_KEY = r"Software\RFID Attendance\RFID Journal\workspace"
 _REGISTRY_VALUE = "home"
 
@@ -26,6 +32,14 @@ _REGISTRY_VALUE = "home"
 def looks_like_home(folder: Path) -> bool:
     """Похожа ли папка на рабочую: в ней уже есть data/ или tables/."""
     return (folder / DB_FILE.parent).is_dir() or (folder / TABLES_DIR).is_dir()
+
+
+def portable_folder() -> Path | None:
+    """Папка собранного exe, если рядом с ним метка портабельной сборки."""
+    if not getattr(sys, "frozen", False):
+        return None
+    folder = Path(sys.executable).resolve().parent
+    return folder if (folder / PORTABLE_MARKER).is_file() else None
 
 
 def remembered() -> Path | None:
@@ -46,8 +60,12 @@ def remembered() -> Path | None:
 
 
 def remember(folder: Path) -> None:
-    """Запомнить папку, выбранную человеком. Сбой записи — не повод падать."""
-    if sys.platform != "win32":
+    """Запомнить папку, выбранную человеком. Сбой записи — не повод падать.
+
+    С флешки не запоминаем: компьютер чужой, а на следующем запуске папку
+    всё равно задаёт метка.
+    """
+    if sys.platform != "win32" or portable_folder() is not None:
         return
     import winreg
 

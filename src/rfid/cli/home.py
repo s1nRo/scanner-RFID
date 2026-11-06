@@ -10,7 +10,9 @@
 
     1. --home                  явно указано в командной строке
     2. переменная RFID_HOME    её выставляет rfid.cmd: папка, где он лежит
-    3. папка exe               у собранного RFID-Scanner.exe вместо текущей,
+    3. флешка                  рядом с exe лежит portable.txt: папка exe —
+                               рабочая, даже пустая (tables/ заводится там)
+    3a. папка exe              у собранного RFID-Scanner.exe вместо текущей,
                                и тоже только если в ней есть data/ или tables/:
                                exe в папке программы работает с её данными
     4. текущая папка           только если в ней уже есть data/ или tables/
@@ -41,6 +43,11 @@ def find_home(explicit: str | Path | None = None) -> Path | None:
     from_env = os.environ.get(HOME_ENV)
     if from_env:
         return _existing(Path(from_env), HOME_ENV)
+    # Портабельная сборка: всё своё носим с собой, на компьютере не ищем.
+    portable = workdir.portable_folder()
+    if portable is not None:
+        (portable / TABLES_DIR).mkdir(exist_ok=True)
+        return portable
     # Рядом с собой — только похожая на рабочую папка. exe, запущенный
     # из «Загрузок», не должен завести там пустую базу.
     if getattr(sys, "frozen", False):

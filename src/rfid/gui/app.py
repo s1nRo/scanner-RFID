@@ -6,6 +6,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 from datetime import date, datetime
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from ..db import CardConflict, ImportStatus, MarkResult, MarkStatus, Storage, St
 from ..enrollment import Candidate
 from ..excel import RosterError, SubjectFolder, discover_subjects
 from ..journal import fill_subject, import_subject
+from ..scanner import driver, find_reader_port
 from ..workdir import DB_FILE, TABLES_DIR
 from .binding import BindDialog, error_beep
 from .data import AttendanceSnapshot, cached_roster, choose_random_late, load_snapshot
@@ -67,6 +69,8 @@ class AttendanceWindow(QMainWindow):
         self.scan_worker: ScanWorker | None = None
         self.pending_cards: list[str] = []
         self.bind_dialog: BindDialog | None = None
+        # Драйвер поставили из окна — запустить сканирование, когда поток закроется.
+        self._restart_scanning = False
 
         self.setWindowTitle("RFID Журнал — учёт посещаемости")
         self.setMinimumSize(960, 640)
@@ -728,7 +732,81 @@ class AttendanceWindow(QMainWindow):
         self.reader_title.setText("Ошибка считывателя")
         self.reader_detail.setText("Проверьте подключение")
         self.statusBar().showMessage(message, 12000)
+        if self._offer_driver():
+            return
         QMessageBox.warning(self, "Сканирование не запущено", message)
+
+    def _offer_driver(self) -> bool:
+        """Считыватель воткнут, а драйвера нет — предложить поставить его с флешки.
+
+        True — человеку уже всё показано, обычное «порт не найден» не нужно.
+        """
+        if sys.platform != "win32":
+            return False
+        try:
+            nodes = driver.WindowsBackend().reader_nodes()
+        except Exception:
+            return False
+        if not any(node.needs_driver for node in nodes):
+            return False
+        package = driver.find_package(driver.default_bases(self.db_path.parent.parent))
+        if package is None:
+            QMessageBox.warning(
+                self,
+                "Нет драйвера считывателя",
+                "Считыватель подключён, но драйвер для него на этом компьютере "
+                "не установлен.\n\nПоложите папку driver (из архива "
+                "ironlogic-driver-*.zip) рядом с программой и нажмите "
+                "«Начать сканирование» ещё раз.",
+            )
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Установить драйвер считывателя?",
+            "Считыватель подключён, но драйвер для него на этом компьютере "
+            f"не установлен.\n\nУстановить его из папки\n{package}?\n\n"
+            "Windows попросит права администратора. Это нужно один раз "
+            "на каждом компьютере.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return True
+        self.statusBar().showMessage("Ставим драйвер считывателя…")
+        executable, args = driver.elevated_command(package)
+        outcome: dict[str, object] = {}
+
+        def work() -> None:
+            try:
+                outcome["code"] = driver.run_elevated(executable, args)
+            except Exception as exc:  # noqa: BLE001 — показать человеку, а не упасть
+                outcome["error"] = exc
+
+        # Ждём установщик, не замораживая окно: он может идти десятки секунд.
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            while thread.is_alive():
+                QApplication.processEvents()
+                thread.join(0.05)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if "error" in outcome:
+            QMessageBox.warning(self, "Драйвер не установлен", str(outcome["error"]))
+        elif outcome.get("code") is None:
+            self.statusBar().showMessage("Установка драйвера отменена", 8000)
+        elif find_reader_port():
+            self.statusBar().showMessage("Драйвер установлен, запускаем сканирование", 8000)
+            self._restart_scanning = True  # после того, как старый поток закроется
+        else:
+            QMessageBox.information(
+                self,
+                "Драйвер установлен",
+                "COM-порт пока не появился. Выньте считыватель, воткните снова "
+                "и нажмите «Начать сканирование».",
+            )
+        return True
 
     def _scan_finished(self, _tally: object) -> None:
         self.subject_combo.setEnabled(True)
@@ -743,6 +821,9 @@ class AttendanceWindow(QMainWindow):
     def _thread_deleted(self) -> None:
         self.scan_thread = None
         self.scan_worker = None
+        if self._restart_scanning:
+            self._restart_scanning = False
+            self._start_scanning()
 
     # ---------------------------------------------------------------- reports
 

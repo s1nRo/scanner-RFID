@@ -6,10 +6,12 @@
     serial_reader.py  чтение из COM-порта с переподключением
     manual.py         ручной ввод и заглушка — источники без железа
     factory.py        make_reader: источник по режиму
+    driver.py         установка драйвера из папки driver/ (портабельная сборка)
 
 Снаружи пользуются этим фасадом, а не модулями внутри.
 """
 
+from . import driver
 from .base import CardReader, Scan
 from .codes import NO_CARD, CardCode, CardCodeError, parse_line, parse_manual
 from .factory import MODES, ReaderUnavailable, make_reader
@@ -30,6 +32,6 @@ __all__ = [
     "KNOWN_PIDS", "MODES", "NO_CARD", "PID_FTDI", "PID_IRONLOGIC", "VID",
     "CardCode", "CardCodeError", "CardReader", "KeyboardCardReader", "MockCardReader",
     "PortInfo", "ReaderUnavailable", "Scan", "SerialCardReader",
-    "available_ports", "find_reader_port", "make_reader",
+    "available_ports", "driver", "find_reader_port", "make_reader",
     "no_port_explanation", "parse_line", "parse_manual",
 ]

@@ -89,6 +89,68 @@ jobs:
           Pop-Location
           exit 0
 
+      # Портабельная сборка (флешка) везёт с собой драйвер. В репозитории
+      # его нет (driver/ в .gitignore), берём из ассета релиза.
+      - name: Download driver package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRIVER_RELEASE: v1.2.0
+        run: |
+          gh release download $env:DRIVER_RELEASE -R $env:GITHUB_REPOSITORY `
+            -p "ironlogic-driver-*.zip" -D "$env:RUNNER_TEMP\drv-zip"
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\drv-zip\*.zip" | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\drv" -Force
+          $inf = Get-ChildItem "$env:RUNNER_TEMP\drv" -Recurse -Filter ftdibus.inf |
+            Select-Object -First 1
+          if (-not $inf) { throw "в архиве драйвера нет ftdibus.inf" }
+          "DRIVER_DIR=$($inf.DirectoryName)" >> $env:GITHUB_ENV
+
+      # Вызовы SetupAPI через ctypes: Windows видит в пакете обе нужные
+      # модели, перечисление устройств не падает. Считывателя на раннере
+      # нет, саму установку проверить здесь нельзя.
+      - name: Check driver package with SetupAPI
+        shell: pwsh
+        run: |
+          python -c "import os, sys; from pathlib import Path; from rfid.scanner import driver as d; problems = d.check_package(Path(os.environ['DRIVER_DIR'])); print(problems or 'models ok'); print(d.WindowsBackend().reader_nodes()); sys.exit(1 if problems else 0)"
+          if ($LASTEXITCODE -ne 0) { throw "пакет драйвера не принят SetupAPI ($LASTEXITCODE)" }
+
+      - name: Build portable folder
+        shell: cmd
+        run: build-portable.cmd
+
+      # С флешки: метка portable.txt рядом — рабочая папка своя, даже пустая.
+      - name: Smoke-test portable folder
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $flash = Join-Path $env:RUNNER_TEMP "flash\RFID"
+          New-Item -ItemType Directory -Force (Split-Path $flash) | Out-Null
+          Copy-Item dist\RFID-Portable $flash -Recurse
+          Push-Location $env:RUNNER_TEMP
+          $p = Start-Process (Join-Path $flash "RFID-Scanner.exe") -PassThru
+          Start-Sleep 15
+          $alive = -not $p.HasExited
+          if ($alive) { taskkill /F /T /PID $p.Id | Out-Null }
+          Pop-Location
+          if (-not $alive) { throw "RFID-Scanner.exe с флешки закрылся (код $($p.ExitCode))" }
+          if (-not (Test-Path (Join-Path $flash "data\attendance.db"))) {
+            throw "портабельный exe не открыл базу рядом с собой"
+          }
+          if (-not (Test-Path (Join-Path $flash "driver\*\ftdiport.inf"))) {
+            throw "в портабельной папке нет драйвера"
+          }
+          exit 0
+
+      - name: Upload portable folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: RFID-Scanner-Portable
+          path: dist/RFID-Portable/
+          if-no-files-found: error
+          retention-days: 30
+
       # Пустых data\ и tables\ в комплекте нарочно нет: распакованный
       # в новое место, exe принял бы их за рабочую папку и завёл бы там
       # пустую базу мимо настоящей. Без них он ищет папку или спрашивает её.

@@ -140,3 +140,37 @@ class TestMainFromStrangerFolder:
         monkeypatch.setenv(H.HOME_ENV, str(workdir))
         cli.main(["subjects"])
         assert "нет ни одной папки предмета" in capsys.readouterr().out
+
+
+class TestPortable:
+    """Флешка: рядом с exe метка portable.txt — данные живут на флешке."""
+
+    @pytest.fixture
+    def flash(self, tmp_path, monkeypatch):
+        folder = tmp_path / "F" / "RFID"
+        folder.mkdir(parents=True)
+        (folder / H.workdir.PORTABLE_MARKER).write_text("portable", encoding="utf-8")
+        monkeypatch.setattr(H.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(H.sys, "executable", str(folder / "RFID-Scanner.exe"))
+        return folder
+
+    def test_exe_folder_is_home_even_empty(self, flash, stranger):
+        # Новая флешка без data и tables — всё равно своя папка, а не «чужая».
+        assert H.find_home() == flash.resolve()
+        assert (flash / "tables").is_dir()
+
+    def test_beats_the_remembered_folder(self, flash, workdir, monkeypatch):
+        # На чужом компьютере в реестре может быть его собственная папка.
+        monkeypatch.setattr(H.workdir, "remembered", lambda: workdir.resolve())
+        assert H.find_home() == flash.resolve()
+
+    def test_explicit_flag_still_wins(self, flash, workdir):
+        assert H.find_home(workdir) == workdir.resolve()
+
+    def test_without_marker_nothing_changes(self, flash, stranger):
+        (flash / H.workdir.PORTABLE_MARKER).unlink()
+        assert H.find_home() is None
+
+    def test_not_frozen_ignores_marker(self, flash, stranger, monkeypatch):
+        monkeypatch.setattr(H.sys, "frozen", False)
+        assert H.workdir.portable_folder() is None
