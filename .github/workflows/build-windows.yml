@@ -128,6 +128,10 @@ jobs:
           $flash = Join-Path $env:RUNNER_TEMP "flash\RFID"
           New-Item -ItemType Directory -Force (Split-Path $flash) | Out-Null
           Copy-Item dist\RFID-Portable $flash -Recurse
+          # База открывается, когда есть предмет: без списка её и не будет.
+          $subject = Join-Path $flash "tables\Предмет"
+          New-Item -ItemType Directory -Force $subject | Out-Null
+          python -c "import sys; from pathlib import Path; from tests.helpers import make_roster_file; make_roster_file(Path(sys.argv[1]) / 'group.xlsx')" $subject
           Push-Location $env:RUNNER_TEMP
           $p = Start-Process (Join-Path $flash "RFID-Scanner.exe") -PassThru
           Start-Sleep 15
