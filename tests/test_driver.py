@@ -175,3 +175,36 @@ def test_report_on_failure(tmp_path):
     ok, text = D.install_and_report(make_package(tmp_path / "drv"),
                                     backend=FakeWindows([ADAPTER], admin=False))
     assert not ok and "администратора" in text
+
+
+def test_standard_pid_without_il_serial_is_not_ours():
+    # 6001 носит любой FTDI-переходник — ставить на него драйвер считывателя нельзя.
+    node = D.DeviceNode("USB" + "\\" + "VID_0403&PID_6001" + "\\" + "A50285BI",
+                        ("USB" + "\\" + "VID_0403&PID_6001",), False)
+    assert node.stage is None
+
+
+def test_standard_pid_port_node_of_the_reader():
+    node = D.DeviceNode("FTDIBUS" + "\\" + "VID_0403+PID_6001+IL040PWZA" + "\\" + "0000",
+                        ("FTDIBUS" + "\\" + "COMPORT&VID_0403&PID_6001",), False)
+    assert node.stage == 2
+
+
+def test_install_flag_without_folder():
+    ok, text = D.install_from_argv(["--from"])
+    assert not ok and "--from" in text
+
+
+def test_exe_install_flag_shows_result_window():
+    """--install-driver без папки — отказ окном, а не IndexError в exe без консоли."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "packaging" / "rfid_gui.py"
+    spec = importlib.util.spec_from_file_location("rfid_gui_entry", path)
+    assert spec and spec.loader
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+    shown: list[tuple[str, int]] = []
+    entry.__dict__["_show_error"] = lambda text, icon=0: shown.append((text, icon))
+    assert entry.run(["--install-driver"]) == 1
+    assert shown and shown[0][1] == entry.MB_ICONERROR

@@ -63,10 +63,46 @@ def test_installs_from_the_folder_beside_and_restarts(window, monkeypatch):
     monkeypatch.setattr(gui_app.driver, "run_elevated",
                         lambda exe, args: calls.append(args) or 0)
     monkeypatch.setattr(gui_app, "find_reader_port", lambda: "COM3")
+    started = []
+    monkeypatch.setattr(window, "_start_scanning", lambda: started.append(1))
     assert window._offer_driver()
     assert calls and str(window.package) in calls[0]
-    assert window._restart_scanning
+    # Поток сканирования уже закрылся, пока ждали установщик, — запускаем сразу,
+    # а не оставляем флаг, который сработал бы на следующей остановке.
+    assert started == [1]
+    assert not window._restart_scanning
     assert window.asked == []
+
+
+def test_restart_waits_for_the_old_thread(window, monkeypatch):
+    FakeBackend.nodes = [NO_DRIVER]
+    answer(monkeypatch, QMessageBox.Yes)
+    monkeypatch.setattr(gui_app.driver, "run_elevated", lambda exe, args: 0)
+    monkeypatch.setattr(gui_app, "find_reader_port", lambda: "COM3")
+    started = []
+    monkeypatch.setattr(window, "_start_scanning", lambda: started.append(1))
+    window.scan_thread = object()  # type: ignore[assignment]
+    assert window._offer_driver()
+    assert started == [] and window._restart_scanning
+    window._thread_deleted()
+    assert started == [1] and not window._restart_scanning
+
+
+def test_failed_installer_is_not_reported_as_success(window, monkeypatch):
+    FakeBackend.nodes = [NO_DRIVER]
+    answer(monkeypatch, QMessageBox.Yes)
+    monkeypatch.setattr(gui_app.driver, "run_elevated", lambda exe, args: 1)
+    monkeypatch.setattr(gui_app, "find_reader_port", lambda: None)
+    assert window._offer_driver()
+    assert window.asked == []  # никакого «Драйвер установлен»
+    assert not window._restart_scanning
+
+
+def test_no_second_session_while_installing(window, monkeypatch):
+    window._installing_driver = True
+    monkeypatch.setattr(window, "_start_scanning",
+                        lambda: pytest.fail("второй UAC во время установки"))
+    window._toggle_scanning()
 
 
 def test_refused_uac_does_not_restart(window, monkeypatch):

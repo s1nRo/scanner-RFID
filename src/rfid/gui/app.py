@@ -71,6 +71,8 @@ class AttendanceWindow(QMainWindow):
         self.bind_dialog: BindDialog | None = None
         # Драйвер поставили из окна — запустить сканирование, когда поток закроется.
         self._restart_scanning = False
+        # Идёт установка драйвера: второе нажатие не должно звать второй UAC.
+        self._installing_driver = False
 
         self.setWindowTitle("RFID Журнал — учёт посещаемости")
         self.setMinimumSize(960, 640)
@@ -542,6 +544,9 @@ class AttendanceWindow(QMainWindow):
     # --------------------------------------------------------------- scanning
 
     def _toggle_scanning(self) -> None:
+        if self._installing_driver:
+            self.statusBar().showMessage("Дождитесь окончания установки драйвера", 5000)
+            return
         if self.scan_thread is not None and self.scan_thread.isRunning():
             self._stop_scanning()
         else:
@@ -783,7 +788,9 @@ class AttendanceWindow(QMainWindow):
                 outcome["error"] = exc
 
         # Ждём установщик, не замораживая окно: он может идти десятки секунд.
+        # Пока ждём, окно живёт — и поток сканирования успевает закрыться.
         thread = threading.Thread(target=work, daemon=True)
+        self._installing_driver = True
         thread.start()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -792,13 +799,21 @@ class AttendanceWindow(QMainWindow):
                 thread.join(0.05)
         finally:
             QApplication.restoreOverrideCursor()
+            self._installing_driver = False
+        code = outcome.get("code")
         if "error" in outcome:
             QMessageBox.warning(self, "Драйвер не установлен", str(outcome["error"]))
-        elif outcome.get("code") is None:
+        elif code is None:
             self.statusBar().showMessage("Установка драйвера отменена", 8000)
+        elif code != 0:
+            # Причину установщик уже показал своим окном.
+            self.statusBar().showMessage("Драйвер не установлен", 8000)
         elif find_reader_port():
             self.statusBar().showMessage("Драйвер установлен, запускаем сканирование", 8000)
-            self._restart_scanning = True  # после того, как старый поток закроется
+            if self.scan_thread is None:
+                self._start_scanning()
+            else:
+                self._restart_scanning = True  # после того, как старый поток закроется
         else:
             QMessageBox.information(
                 self,

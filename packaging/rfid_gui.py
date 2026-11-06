@@ -18,11 +18,15 @@ from rfid.cli import main
 TITLE = "RFID Журнал"
 
 
-def _show_error(text: str) -> None:
+MB_ICONERROR = 0x10
+MB_ICONINFORMATION = 0x40
+
+
+def _show_error(text: str, icon: int = MB_ICONERROR) -> None:
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, text, TITLE, 0x10)  # MB_ICONERROR
+        ctypes.windll.user32.MessageBoxW(None, text, TITLE, icon)
     except Exception:
         pass
 
@@ -56,7 +60,9 @@ def run(argv: list[str]) -> int:
     if argv[:1] == [INSTALL_DRIVER]:
         from rfid.scanner import driver
 
-        return driver.main(argv[1:])
+        ok, text = driver.install_from_argv(argv[1:])
+        _show_error(text, MB_ICONINFORMATION if ok else MB_ICONERROR)
+        return 0 if ok else 1
     command = gui_argv(argv)
     if not getattr(sys, "frozen", False):  # python packaging\rfid_gui.py — консоль есть
         return main(command)

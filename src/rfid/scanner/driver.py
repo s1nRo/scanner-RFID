@@ -24,13 +24,14 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ports import KNOWN_PIDS, VID
+from .ports import KNOWN_PIDS, PID_IRONLOGIC, SERIAL_PREFIX, VID
 
 BUS_INF = "ftdibus.inf"
 PORT_INF = "ftdiport.inf"
@@ -99,9 +100,21 @@ class DeviceNode:
         return any(hwid.upper().startswith(prefix) for hwid in self.hardware_ids)
 
     @property
+    def looks_ironlogic(self) -> bool:
+        """Серийник IL… в instance id: USB\\VID…\\IL040PWZ, FTDIBUS\\VID…+IL040PWZA\\0000."""
+        return any(part.upper().startswith(SERIAL_PREFIX)
+                   for part in re.split(r"[\\+]", self.instance_id))
+
+    @property
     def stage(self) -> int | None:
-        """1 — сам USB-адаптер, 2 — порт, который порождает ftdibus. None — не наш."""
+        """1 — сам USB-адаптер, 2 — порт, который порождает ftdibus. None — не наш.
+
+        PID 6001 носит любой FTDI-переходник — наш только с серийником IL…,
+        как и при поиске порта (ports.PortInfo.rank).
+        """
         for pid in KNOWN_PIDS:
+            if pid != PID_IRONLOGIC and not self.looks_ironlogic:
+                continue
             ids = f"VID_{VID:04X}&PID_{pid:04X}"
             if self.matches(f"FTDIBUS\\COMPORT&{ids}"):
                 return 2
@@ -190,8 +203,10 @@ def install(
         nodes = api.reader_nodes()
 
     if not any(n.stage == 2 for n in nodes):
+        first = ("Этап 1 прошёл" if done else
+                 "Драйвер адаптера уже стоит (этап 1 не нужен)")
         raise DriverError(
-            "Этап 1 прошёл, но узел порта (FTDIBUS\\COMPORT…) не появился.\n"
+            f"{first}, но узел порта (FTDIBUS\\COMPORT…) не появился.\n"
             "Выньте считыватель, воткните снова и повторите установку."
         )
     for step in plan(nodes, 2):
@@ -312,25 +327,22 @@ def elevated_command(package: Path) -> tuple[str, list[str]]:
     return sys.executable, ["-m", "rfid.scanner.driver", "--from", str(package)]
 
 
-def main(argv: list[str]) -> int:
-    """Точка входа установки с правами: exe --install-driver или python -m.
-
-    Консоли у exe нет — итог показывается окном Windows.
+def install_from_argv(argv: list[str]) -> tuple[bool, str]:
+    """Установка с правами по аргументам «--from <папка>». Показ — дело вызывающего:
+    exe показывает итог окном (packaging/rfid_gui.py), python -m — в консоли.
     """
-    package = Path(argv[argv.index("--from") + 1]) if "--from" in argv else None
-    if package is None:
-        ok, text = False, "Не указана папка драйвера."
-    else:
-        ok, text = install_and_report(package)
     try:
-        import ctypes
-
-        icon = 0x40 if ok else 0x10  # MB_ICONINFORMATION / MB_ICONERROR
-        ctypes.windll.user32.MessageBoxW(None, text, "RFID Журнал", icon)  # type: ignore[attr-defined]
-    except Exception:
-        print(text)
-    return 0 if ok else 1
+        package = Path(argv[argv.index("--from") + 1])
+    except (ValueError, IndexError):
+        return False, "Не указана папка драйвера (--from <папка>)."
+    return install_and_report(package)
 
 
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+if __name__ == "__main__":  # окно, запущенное без exe: rfid-gui.cmd
+    ok, text = install_from_argv(sys.argv[1:])
+    print(text)
+    try:
+        input("\nНажмите Enter, чтобы закрыть окно…")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    sys.exit(0 if ok else 1)
