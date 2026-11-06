@@ -37,13 +37,22 @@ from PyQt5.QtWidgets import (
 )
 
 from .. import enrollment, workdir
-from ..db import CardConflict, ImportStatus, MarkResult, MarkStatus, Storage, Student
+from ..db import (
+    CardConflict,
+    CardTaken,
+    ImportStatus,
+    MarkResult,
+    MarkStatus,
+    Storage,
+    Student,
+)
 from ..enrollment import Candidate
 from ..excel import RosterError, SubjectFolder, discover_subjects
 from ..journal import fill_subject, import_subject
 from ..scanner import driver, find_reader_port
 from ..workdir import DB_FILE, TABLES_DIR
 from .binding import BindDialog, error_beep
+from .card_dialog import ReplaceCardDialog
 from .data import AttendanceSnapshot, cached_roster, choose_random_late, load_snapshot
 from .worker import ScanWorker
 
@@ -316,6 +325,24 @@ class AttendanceWindow(QMainWindow):
         manual_layout.addWidget(self.manual_mark_button)
         manual_layout.addStretch(1)
         layout.addWidget(manual_group)
+
+        card_group = QGroupBox("Карта выбранного студента")
+        card_layout = QHBoxLayout(card_group)
+        self.replace_card_button = QPushButton("Заменить карту…")
+        self.replace_card_button.setToolTip(
+            "Потерял карту, выдали новую или привязали не ту: прошлые отметки "
+            "останутся за студентом"
+        )
+        self.replace_card_button.clicked.connect(self._replace_card_of_selected)
+        card_layout.addWidget(self.replace_card_button)
+        self.unbind_card_button = QPushButton("Снять карту")
+        self.unbind_card_button.setToolTip(
+            "Студент останется без карты; отметки этой картой вернутся в неизвестные"
+        )
+        self.unbind_card_button.clicked.connect(self._unbind_card_of_selected)
+        card_layout.addWidget(self.unbind_card_button)
+        card_layout.addStretch(1)
+        layout.addWidget(card_group)
 
         binding_group = QGroupBox("Привязка неизвестной карты")
         binding_layout = QVBoxLayout(binding_group)
@@ -711,8 +738,8 @@ class AttendanceWindow(QMainWindow):
         except CardConflict as exc:
             QMessageBox.warning(
                 self, "Не удалось привязать карту",
-                f"Не привязано: {exc}. Сначала снимите старую карту "
-                f"(rfid students remove {exc.student.card_code}).",
+                f"Не привязано: {exc}. Чтобы выдать ему другую карту, выберите "
+                "его во вкладке «Студенты и карты» и нажмите «Заменить карту…».",
             )
             return None
         except Exception as exc:  # что угодно — сказать, не терять молча
@@ -996,6 +1023,8 @@ class AttendanceWindow(QMainWindow):
         self.students_table.resizeRowsToContents()
         has_students = bool(rows)
         self.manual_mark_button.setEnabled(has_students)
+        self.replace_card_button.setEnabled(has_students)
+        self.unbind_card_button.setEnabled(has_students)
         self.bind_card_button.setEnabled(has_students and bool(self.pending_cards))
 
     def _selected_student(self) -> Student | None:
@@ -1066,6 +1095,102 @@ class AttendanceWindow(QMainWindow):
         self.person_name.setText(saved.full_name)
         self.person_meta.setText(f"Группа {saved.group_name} · карта {saved.card_code}")
         self.scan_status_chip.setText("Карта привязана, отметка сохранена")
+        folder = self._current_folder()
+        if folder is not None and not self._scanning_active():
+            self._export_subject_now(folder)
+        self._refresh_today()
+        self._refresh_report()
+
+    def _replace_card_of_selected(self) -> None:
+        student = self._selected_student()
+        if student is None:
+            return
+        try:
+            with Storage(self.db_path) as storage:
+                unknown = storage.unknown_cards()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Карта не заменена", str(exc))
+            return
+        dialog = ReplaceCardDialog(
+            self, student, unknown, mode=self.mode, port=self.port,
+            reader_free=not self._scanning_active(),
+        )
+        if dialog.exec_() != ReplaceCardDialog.Accepted or dialog.code is None:
+            return
+        self._apply_replace(student, dialog.code)
+
+    def _apply_replace(self, student: Student, code: str) -> None:
+        """Заменить карту; если она чужая — спросить, не ошибка ли привязки."""
+        take = False
+        while True:
+            try:
+                with Storage(self.db_path) as storage:
+                    result = storage.replace_card(student.id, code, take=take)
+                break
+            except CardTaken as exc:
+                owner = exc.owner
+                answer = QMessageBox.question(
+                    self,
+                    "Карта уже привязана",
+                    f"Карта {code} сейчас закреплена за студентом\n"
+                    f"{owner.full_name} ({owner.group_name}).\n\n"
+                    "Если её привязали по ошибке — забрать карту и отдать "
+                    f"{student.full_name}? Отметки, сделанные этой картой, перейдут "
+                    f"к {student.full_name}, а {owner.full_name} останется без карты.",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if answer != QMessageBox.Yes:
+                    return
+                take = True
+            except Exception as exc:  # noqa: BLE001 — сказать, не терять молча
+                QMessageBox.warning(self, "Карта не заменена", str(exc))
+                return
+        if code in self.pending_cards:
+            self.pending_cards.remove(code)
+            self._refresh_pending_cards()
+        parts = [f"{result.student.full_name}: карта {code}"]
+        if result.old_code:
+            parts.append(f"вместо {result.old_code}")
+        if result.moved:
+            parts.append(f"отметок этой картой зачтено: {result.moved}")
+        if result.previous_owner is not None:
+            parts.append(f"снята с {result.previous_owner.full_name}")
+        self.statusBar().showMessage(", ".join(parts), 10000)
+        self._after_card_change()
+
+    def _unbind_card_of_selected(self) -> None:
+        student = self._selected_student()
+        if student is None:
+            return
+        if not student.card_code:
+            QMessageBox.information(self, "Карты нет",
+                                    f"У {student.full_name} карта не привязана.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Снять карту?",
+            f"Снять карту {student.card_code} со студента {student.full_name}?\n\n"
+            "Отметки, сделанные этой картой, вернутся в «неизвестные» — их можно "
+            "будет отдать другому студенту. Отметки из таблиц останутся за ним.\n\n"
+            "Если студенту просто выдали новую карту, лучше «Заменить карту…»: "
+            "тогда его отметки останутся при нём.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            with Storage(self.db_path) as storage:
+                storage.remove_student(student.card_code)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Карта не снята", str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Карта {student.card_code} снята с {student.full_name}", 8000)
+        self._after_card_change()
+
+    def _after_card_change(self) -> None:
         folder = self._current_folder()
         if folder is not None and not self._scanning_active():
             self._export_subject_now(folder)

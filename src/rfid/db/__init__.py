@@ -12,6 +12,8 @@
 
 from .models import (
     CardConflict,
+    CardReplaced,
+    CardTaken,
     DayRow,
     GroupStat,
     ImportStatus,
@@ -26,6 +28,7 @@ from .storage import BUSY_TIMEOUT_MS, IMPORT_RAW, Storage
 
 __all__ = [
     "BUSY_TIMEOUT_MS", "IMPORT_RAW", "NO_SUBJECT", "SCHEMA_VERSION",
-    "CardConflict", "DayRow", "GroupStat", "ImportStatus", "MarkResult", "MarkStatus",
+    "CardConflict", "CardReplaced", "CardTaken", "DayRow", "GroupStat", "ImportStatus",
+    "MarkResult", "MarkStatus",
     "Storage", "Student", "Subject", "UnknownCard",
 ]

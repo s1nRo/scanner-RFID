@@ -22,6 +22,8 @@ from ..names import normalize_name
 from ..scanner.codes import CardCode
 from .models import (
     CardConflict,
+    CardReplaced,
+    CardTaken,
     DayRow,
     GroupStat,
     ImportStatus,
@@ -396,6 +398,68 @@ class Storage:
             return False
         self._unbind(student.id)
         return True
+
+    def student_by_id(self, student_id: int) -> Student | None:
+        row = self.conn.execute(
+            "SELECT * FROM students WHERE id = ?", (student_id,)
+        ).fetchone()
+        return _as_student(row) if row else None
+
+    def replace_card(
+        self, student_id: int, code: CardCode | str, *, take: bool = False
+    ) -> CardReplaced:
+        """Дать человеку другую карту: потерял, сменил, привязали по ошибке.
+
+        В отличие от remove_student + bind_card его прошлые отметки остаются
+        его: карта меняется, человек тот же. Старая карта в них заменяется
+        новой, чтобы UNIQUE(day, subject_id, card_code) и дальше ловил
+        повторное прикладывание на том же занятии.
+
+        Новая карта у другого человека — CardTaken, если не take. С take
+        это исправление ошибочной привязки: у прежнего владельца карту
+        снимают (remove_student), и её отметки переходят к этому человеку.
+
+        Если за одно занятие оказалось две отметки (старой картой и новой),
+        остаётся более ранняя — это настоящее время прихода.
+        """
+        new = code.canonical if isinstance(code, CardCode) else code
+        with self.transaction():
+            student = self.student_by_id(student_id)
+            if student is None:
+                raise ValueError("студент не найден в базе")
+            old = student.card_code
+            if old == new:
+                return CardReplaced(student, old, 0, None)
+            owner = self.find_student(new)
+            if owner is not None:
+                if not take:
+                    raise CardTaken(owner)
+                self._unbind(owner.id)
+            if old is not None:
+                # Его отметки старой картой и безымянные отметки новой —
+                # одна и та же история прихода. На одном занятии оставляем
+                # самую раннюю, иначе переименование упрётся в UNIQUE.
+                def mine(t: str) -> str:
+                    return (f"({t}.student_id = :sid AND {t}.card_code = :old "
+                            f"OR {t}.student_id IS NULL AND {t}.card_code = :new)")
+
+                self.conn.execute(
+                    f"DELETE FROM attendance AS a WHERE {mine('a')} "
+                    f"AND EXISTS (SELECT 1 FROM attendance b WHERE {mine('b')} "
+                    "  AND b.day = a.day AND b.subject_id = a.subject_id AND b.id != a.id "
+                    "  AND (b.at < a.at OR b.at = a.at AND b.id < a.id))",
+                    {"sid": student.id, "old": old, "new": new},
+                )
+                self.conn.execute(
+                    "UPDATE attendance SET card_code = ? WHERE student_id = ? AND card_code = ?",
+                    (new, student.id, old),
+                )
+            self.conn.execute("UPDATE students SET card_code = ? WHERE id = ?",
+                              (new, student.id))
+            updated = Student(student.id, new, student.full_name, student.group_name)
+            moved = self._attach_past_marks(updated)
+            self._stamp_card_on_marks(updated)
+        return CardReplaced(updated, old, moved, owner)
 
     def unbind_all_cards(self) -> None:
         """Снять все привязки карт, не трогая людей и отметки из таблиц."""

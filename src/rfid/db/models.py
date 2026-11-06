@@ -92,6 +92,24 @@ class UnknownCard:
     last_seen: datetime
 
 
+class CardTaken(Exception):
+    """Новая карта уже закреплена за другим человеком."""
+
+    def __init__(self, owner: Student):
+        self.owner = owner
+        super().__init__(
+            f"карта {owner.card_code} уже за {owner.full_name} ({owner.group_name})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CardReplaced:
+    student: Student
+    old_code: str | None
+    moved: int                       # чужих (безымянных) отметок новой карты стало его
+    previous_owner: Student | None   # у кого карту забрали, если забрали
+
+
 class CardConflict(Exception):
     """У человека уже есть другая карта."""
 
