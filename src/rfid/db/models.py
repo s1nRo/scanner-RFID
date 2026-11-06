@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from ..scanner.codes import CardCode
+from ..scanner.codes import CardCode, pretty_code
 
 
 class MarkStatus(Enum):
@@ -98,7 +98,8 @@ class CardTaken(Exception):
     def __init__(self, owner: Student):
         self.owner = owner
         super().__init__(
-            f"карта {owner.card_code} уже за {owner.full_name} ({owner.group_name})"
+            f"карта {pretty_code(owner.card_code or '')} "
+            f"уже за {owner.full_name} ({owner.group_name})"
         )
 
 
@@ -115,6 +116,7 @@ class CardConflict(Exception):
 
     def __init__(self, student: Student):
         super().__init__(
-            f"у студента {student.full_name} уже есть карта {student.card_code}"
+            f"у студента {student.full_name} "
+            f"уже есть карта {pretty_code(student.card_code or '')}"
         )
         self.student = student

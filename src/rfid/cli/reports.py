@@ -8,7 +8,7 @@ from .. import excel
 from ..db import Storage
 from ..excel import discover_subjects
 from ..lessons import LATE_AFTER, late_arrivals
-from ..scanner import CardCodeError, parse_manual
+from ..scanner import CardCode, CardCodeError, parse_manual, pretty_code, short_form
 from . import common
 from .common import DATE_INPUT, Interrupted
 from .subjects import choose_subject, report_misplaced
@@ -45,7 +45,7 @@ def cmd_report(args) -> int:
         if unknown:
             print(f"\nНепривязанные карты в этот день: {len(unknown)}")
             for card_code, at in unknown:
-                print(f"  {card_code}  {at.strftime('%H:%M')}")
+                print(f"  {pretty_code(card_code)}  {at.strftime('%H:%M')}")
     return 0
 
 
@@ -113,14 +113,30 @@ def cmd_subjects(args) -> int:
     return 0
 
 
+def _card_to_remove(storage: Storage, text: str) -> CardCode | str | None:
+    """Какую карту снимать. Короткую запись (как на экране) ищем среди привязанных:
+    в ней нет префикса, поэтому две карты могут совпасть — тогда только полный код.
+    """
+    short = short_form(text)
+    if short is None:
+        try:
+            return parse_manual(text)
+        except CardCodeError as exc:
+            raise Interrupted(str(exc)) from None
+    found = [student.card_code for student in storage.list_students(with_card=True)
+             if student.card_code and pretty_code(student.card_code) == short]
+    if len(found) > 1:
+        raise Interrupted(f"Карт с номером {short} несколько: {', '.join(found)}. "
+                          "Укажите полный код.")
+    return found[0] if found else None
+
+
 def cmd_students(args) -> int:
     with Storage(args.db) as storage:
         if args.students_action == "remove":
-            try:
-                code = parse_manual(args.code)
-            except CardCodeError as exc:
-                raise Interrupted(str(exc)) from None
-            print("Привязка снята." if storage.remove_student(code) else "Такой карты нет.")
+            code = _card_to_remove(storage, args.code)
+            removed = code is not None and storage.remove_student(code)
+            print("Привязка снята." if removed else "Такой карты нет.")
             return 0
 
         students = storage.list_students(with_card=True)
@@ -130,7 +146,8 @@ def cmd_students(args) -> int:
         print(f"{'Код карты':<12} {'ФИО':<38} Группа")
         print(_RULE)
         for student in students:
-            print(f"{student.card_code:<12} {student.full_name:<38} {student.group_name}")
+            card = pretty_code(student.card_code or "")
+            print(f"{card:<12} {student.full_name:<38} {student.group_name}")
         print(f"\nВсего: {len(students)}")
     return 0
 
@@ -144,7 +161,7 @@ def cmd_unknown(args) -> int:
     print(f"{'Код карты':<12} {'Раз':>4}  Последний раз")
     print("─" * 50)
     for card in cards:
-        print(f"{card.card_code:<12} {card.times:>4}  "
+        print(f"{pretty_code(card.card_code):<12} {card.times:>4}  "
               f"{card.last_seen.strftime('%d.%m.%Y %H:%M')}")
     print("\nПривязать: rfid enroll — приложите карту и выберите номер из списка.")
     return 0

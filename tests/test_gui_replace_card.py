@@ -157,9 +157,33 @@ def dialog(window):
 
 def test_unknown_card_fills_the_code(dialog):
     dialog.unknown_list.setCurrentRow(0)
-    assert dialog.code_edit.text() == NEW.canonical
+    assert dialog.code_edit.text() == "008,43"  # показ десятичный
+    assert "B20008002B" not in dialog.unknown_list.item(0).text()
     dialog._accept()
-    assert dialog.code == NEW.canonical
+    assert dialog.code == NEW.canonical  # а выбран полный код
+
+
+def test_edited_field_does_not_keep_the_picked_card(dialog):
+    dialog.unknown_list.setCurrentRow(0)
+    dialog.code_edit.setText("009,44")  # руками и без префикса — неполный код
+    dialog._accept()
+    assert dialog.code is None
+    assert "Не похоже" in dialog.status.text()
+
+
+def test_pending_combo_keeps_full_code_of_lookalike_cards(window, monkeypatch):
+    """Короткий вид совпал, но привязаться должна именно выбранная карта."""
+    twin = card("Em-Marine[C300] 008,43")
+    ivan = student(window, ROSTER_NAMES[0])
+    window.pending_cards = [NEW.canonical, twin.canonical]
+    window._refresh_pending_cards()
+    combo = window.pending_card_combo
+    assert [combo.itemText(i) for i in range(combo.count())] == ["008,43", "008,43"]
+    combo.setCurrentIndex(1)
+    monkeypatch.setattr(window, "_selected_student", lambda: ivan)
+    window._bind_card_to_selected_student()
+    assert must(owner_of(window, twin)).id == ivan.id
+    assert owner_of(window, NEW) is None
 
 
 def test_garbage_is_refused(dialog):
@@ -173,6 +197,16 @@ def test_same_card_is_refused(dialog):
     dialog.code_edit.setText(OLD.canonical)
     dialog._accept()
     assert dialog.code is None
+
+
+def test_status_bar_shows_decimal_code(window, monkeypatch):
+    ivan = student(window, ROSTER_NAMES[0], OLD)
+    monkeypatch.setattr(window, "_selected_student", lambda: ivan)
+    choose_in_dialog(monkeypatch, NEW.canonical)
+    window._replace_card_of_selected()
+    message = window.statusBar().currentMessage()
+    assert "008,43" in message and "007,42" in message
+    assert NEW.canonical not in message and OLD.canonical not in message
 
 
 def test_reader_busy_while_scanning(window):

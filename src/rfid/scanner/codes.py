@@ -42,6 +42,9 @@ _CARD_RE = re.compile(
 # Канонический вид: 10 шестнадцатеричных цифр, ровно 5 байт.
 _CANONICAL_RE = re.compile(r"^(?P<hex>[0-9A-Fa-f]{10})$")
 
+# То, что видит человек: 007,42. Префикса тут нет.
+_SHORT_RE = re.compile(r"^(?P<facility>\d{1,3}),(?P<number>\d{1,5})$")
+
 _MAX_PREFIX = 0xFFFF
 _MAX_FACILITY = 0xFF
 _MAX_NUMBER = 0xFFFF
@@ -106,6 +109,26 @@ class CardCode:
         )
 
 
+def pretty_code(canonical: str) -> str:
+    """Код из базы — как его показывают человеку: A10007002A -> 007,42.
+
+    Только для показа. Префикса здесь нет, поэтому хранить и сравнивать карты
+    надо по каноническому коду. Показ не должен падать: непонятное — как есть.
+    """
+    try:
+        return CardCode.from_canonical(canonical).pretty
+    except CardCodeError:
+        return canonical
+
+
+def short_form(text: str) -> str | None:
+    """Привести короткую запись к виду pretty: 7,42 -> 007,42. Не она — None."""
+    m = _SHORT_RE.match(text.strip())
+    if not m:
+        return None
+    return f"{int(m.group('facility')):03d},{int(m.group('number'))}"
+
+
 def parse_line(line: str) -> CardCode | None:
     """Разобрать одну строку от считывателя.
 
@@ -150,7 +173,7 @@ def parse_manual(text: str) -> CardCode:
     if _CANONICAL_RE.match(text):
         return CardCode.from_canonical(text)
 
-    if re.match(r"^\d{1,3},\d{1,5}$", text):
+    if _SHORT_RE.match(text):
         raise CardCodeError(
             f"{text!r} — короткая форма без префикса. "
             "Нужен полный код: 10 шестнадцатеричных цифр или строка целиком "

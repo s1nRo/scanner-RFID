@@ -29,7 +29,7 @@ from PyQt5.QtWidgets import (
 
 from ..enrollment import Candidate
 from ..names import normalize_name
-from ..scanner import Scan
+from ..scanner import Scan, pretty_code
 
 
 def error_beep() -> None:
@@ -57,7 +57,7 @@ class BindDialog(QDialog):
         self.rejected_count = 0
 
         layout = QVBoxLayout(self)
-        title = QLabel(f"Карта {code} не привязана. Кто это?")
+        title = QLabel(f"Карта {pretty_code(code)} не привязана. Кто это?")
         title.setStyleSheet("font-size: 16px; font-weight: 600;")
         title.setWordWrap(True)
         layout.addWidget(title)

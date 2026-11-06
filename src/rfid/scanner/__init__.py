@@ -13,7 +13,15 @@
 
 from . import driver
 from .base import CardReader, Scan
-from .codes import NO_CARD, CardCode, CardCodeError, parse_line, parse_manual
+from .codes import (
+    NO_CARD,
+    CardCode,
+    CardCodeError,
+    parse_line,
+    parse_manual,
+    pretty_code,
+    short_form,
+)
 from .factory import MODES, ReaderUnavailable, make_reader
 from .manual import KeyboardCardReader, MockCardReader
 from .ports import (
@@ -33,5 +41,5 @@ __all__ = [
     "CardCode", "CardCodeError", "CardReader", "KeyboardCardReader", "MockCardReader",
     "PortInfo", "ReaderUnavailable", "Scan", "SerialCardReader",
     "available_ports", "driver", "find_reader_port", "make_reader",
-    "no_port_explanation", "parse_line", "parse_manual",
+    "no_port_explanation", "parse_line", "parse_manual", "pretty_code", "short_form",
 ]

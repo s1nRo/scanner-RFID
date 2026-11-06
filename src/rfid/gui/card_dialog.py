@@ -5,6 +5,9 @@
   - выбрать из неизвестных — её уже прикладывали, но не привязали;
   - ввести код руками (строка считывателя или 10 цифр) — на крайний случай.
 
+Показываем короткий код (007,42), но в нём нет префикса: выбранная или
+прочитанная карта хранится полным кодом в _picked, а не берётся из поля.
+
 Окно только выбирает карту. Саму замену делает Storage.replace_card.
 """
 
@@ -28,7 +31,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..db import Student, UnknownCard
-from ..scanner import CardCodeError, ReaderUnavailable, make_reader, parse_manual
+from ..scanner import CardCodeError, ReaderUnavailable, make_reader, parse_manual, pretty_code
 
 
 class CardGrabber(QObject):
@@ -63,7 +66,7 @@ class CardGrabber(QObject):
 
 
 def _unknown_text(item: UnknownCard) -> str:
-    return (f"{item.card_code}   прикладывали {item.times} раз, "
+    return (f"{pretty_code(item.card_code)}   прикладывали {item.times} раз, "
             f"последний {item.last_seen:%d.%m %H:%M}")
 
 
@@ -81,6 +84,7 @@ class ReplaceCardDialog(QDialog):
         super().__init__(parent)
         self.student = student
         self.code: str | None = None
+        self._picked: str | None = None
         self.mode = mode
         self.port = port
         self._thread: QThread | None = None
@@ -90,7 +94,7 @@ class ReplaceCardDialog(QDialog):
         self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
 
-        current = student.card_code or "нет"
+        current = pretty_code(student.card_code) if student.card_code else "нет"
         title = QLabel(f"<b>{student.full_name}</b> ({student.group_name})<br>"
                        f"Сейчас карта: {current}")
         title.setTextFormat(Qt.RichText)
@@ -144,7 +148,11 @@ class ReplaceCardDialog(QDialog):
     def _unknown_chosen(self, item: QListWidgetItem | None, _previous=None) -> None:
         code = item.data(Qt.UserRole) if item is not None else None
         if code:
-            self.code_edit.setText(code)
+            self._pick(code)
+
+    def _pick(self, code: str) -> None:
+        self._picked = code
+        self.code_edit.setText(pretty_code(code))
 
     def _start_reading(self) -> None:
         if self._thread is not None:
@@ -164,8 +172,8 @@ class ReplaceCardDialog(QDialog):
         thread.start()
 
     def _card_read(self, code: str) -> None:
-        self.code_edit.setText(code)
-        self._say(f"Прочитана карта {code}. Нажмите «Заменить».")
+        self._pick(code)
+        self._say(f"Прочитана карта {pretty_code(code)}. Нажмите «Заменить».")
 
     def _reading_done(self) -> None:
         if self._thread is not None:
@@ -188,11 +196,15 @@ class ReplaceCardDialog(QDialog):
     # -------------------------------------------------------------- итог
 
     def _accept(self) -> None:
-        try:
-            code = parse_manual(self.code_edit.text()).canonical
-        except CardCodeError as exc:
-            self._say(f"Не похоже на код карты: {exc}", error=True)
-            return
+        text = self.code_edit.text().strip()
+        if self._picked is not None and text == pretty_code(self._picked):
+            code = self._picked
+        else:
+            try:
+                code = parse_manual(text).canonical
+            except CardCodeError as exc:
+                self._say(f"Не похоже на код карты: {exc}", error=True)
+                return
         if code == self.student.card_code:
             self._say("Это та же самая карта, что уже привязана.", error=True)
             return

@@ -14,7 +14,7 @@ from .. import enrollment, pipeline
 from ..db import CardConflict, MarkResult, MarkStatus, Storage, Student
 from ..enrollment import Candidate, bound_count, by_number
 from ..excel import SubjectFolder
-from ..scanner import CardCode, CardReader, ReaderUnavailable, make_reader
+from ..scanner import CardCode, CardReader, ReaderUnavailable, make_reader, pretty_code
 from . import common
 from .common import DATE_INPUT, Interrupted
 from .home import guard_mock
@@ -194,7 +194,7 @@ def cmd_enroll(args) -> int:
                     print(_NEXT_CARD)
                     continue
 
-                print(f"  Карта прочитана: {scan.code.canonical}")
+                print(f"  Карта прочитана: {scan.code.pretty}")
                 try:
                     choice = common.ask(
                         "  Номер студента (Enter — пропустить, 0 — закончить): "
@@ -237,7 +237,7 @@ def _bind(
                                 includes_current=includes_current)
     except CardConflict as exc:
         print(f"  Не привязано: {exc}. Сначала снимите старую: "
-              f"rfid students remove {exc.student.card_code}")
+              f"rfid students remove {pretty_code(exc.student.card_code or '')}")
         return None
     print(f"  Привязано: {bound.student.full_name} ({bound.student.group_name})")
     if bound.past > 0:
@@ -261,7 +261,7 @@ def cmd_whois(args) -> int:
                 student = storage.find_student(scan.code)
                 owner = (f"{student.full_name} ({student.group_name})"
                          if student else "КАРТА НЕ ПРИВЯЗАНА")
-                print(f"  {scan.code.canonical}  →  {owner}")
+                print(f"  {scan.code.pretty}  →  {owner}")
         except KeyboardInterrupt:
             print()
     return 0

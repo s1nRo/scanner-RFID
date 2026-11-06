@@ -106,7 +106,7 @@ class ConsoleView:
             paint, ok = _YELLOW, True
         else:
             label = " НЕИЗВЕСТНАЯ КАРТА"
-            main = f"{code.canonical}  ({code.pretty})"
+            main = code.pretty
             right = result.at.strftime("%H:%M")
             hint = self.unknown_hint
             paint, ok = _RED, False

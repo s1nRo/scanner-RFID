@@ -49,7 +49,7 @@ from ..db import (
 from ..enrollment import Candidate
 from ..excel import RosterError, SubjectFolder, discover_subjects
 from ..journal import fill_subject, import_subject
-from ..scanner import driver, find_reader_port
+from ..scanner import driver, find_reader_port, pretty_code
 from ..workdir import DB_FILE, TABLES_DIR
 from .binding import BindDialog, error_beep
 from .card_dialog import ReplaceCardDialog
@@ -625,7 +625,7 @@ class AttendanceWindow(QMainWindow):
         self._refresh_today()
         if result.student is None:
             name = "Карта не привязана"
-            meta = f"{result.code.canonical} · {result.at:%H:%M}"
+            meta = f"{result.code.pretty} · {result.at:%H:%M}"
             chip = "Неизвестная карта"
             if result.code.canonical not in self.pending_cards:
                 self.pending_cards.append(result.code.canonical)
@@ -704,7 +704,7 @@ class AttendanceWindow(QMainWindow):
         if self.bind_dialog is not None:
             self.bind_dialog.note_rejected(scan)
         self.statusBar().showMessage(
-            f"Карта {scan.code.canonical} не принята: сначала привяжите предыдущую. "
+            f"Карта {scan.code.pretty} не принята: сначала привяжите предыдущую. "
             "Пусть студент приложит её ещё раз.", 10_000,
         )
 
@@ -1013,7 +1013,7 @@ class AttendanceWindow(QMainWindow):
             values = (
                 row.student.full_name,
                 row.student.group_name,
-                row.student.card_code or "Не привязана",
+                pretty_code(row.student.card_code) if row.student.card_code else "Не привязана",
                 row.at.strftime("%H:%M") if row.at else "Нет",
             )
             for column, value in enumerate(values):
@@ -1079,7 +1079,7 @@ class AttendanceWindow(QMainWindow):
 
     def _bind_card_to_selected_student(self) -> None:
         student = self._selected_student()
-        code = self.pending_card_combo.currentText()
+        code = self.pending_card_combo.currentData()
         if student is None or not code:
             if not code:
                 QMessageBox.information(
@@ -1093,7 +1093,7 @@ class AttendanceWindow(QMainWindow):
         if saved is None:
             return
         self.person_name.setText(saved.full_name)
-        self.person_meta.setText(f"Группа {saved.group_name} · карта {saved.card_code}")
+        self.person_meta.setText(f"Группа {saved.group_name} · карта {pretty_code(code)}")
         self.scan_status_chip.setText("Карта привязана, отметка сохранена")
         folder = self._current_folder()
         if folder is not None and not self._scanning_active():
@@ -1132,7 +1132,7 @@ class AttendanceWindow(QMainWindow):
                 answer = QMessageBox.question(
                     self,
                     "Карта уже привязана",
-                    f"Карта {code} сейчас закреплена за студентом\n"
+                    f"Карта {pretty_code(code)} сейчас закреплена за студентом\n"
                     f"{owner.full_name} ({owner.group_name}).\n\n"
                     "Если её привязали по ошибке — забрать карту и отдать "
                     f"{student.full_name}? Отметки, сделанные этой картой, перейдут "
@@ -1149,9 +1149,9 @@ class AttendanceWindow(QMainWindow):
         if code in self.pending_cards:
             self.pending_cards.remove(code)
             self._refresh_pending_cards()
-        parts = [f"{result.student.full_name}: карта {code}"]
+        parts = [f"{result.student.full_name}: карта {pretty_code(code)}"]
         if result.old_code:
-            parts.append(f"вместо {result.old_code}")
+            parts.append(f"вместо {pretty_code(result.old_code)}")
         if result.moved:
             parts.append(f"отметок этой картой зачтено: {result.moved}")
         if result.previous_owner is not None:
@@ -1170,7 +1170,7 @@ class AttendanceWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Снять карту?",
-            f"Снять карту {student.card_code} со студента {student.full_name}?\n\n"
+            f"Снять карту {pretty_code(student.card_code)} со студента {student.full_name}?\n\n"
             "Отметки, сделанные этой картой, вернутся в «неизвестные» — их можно "
             "будет отдать другому студенту. Отметки из таблиц останутся за ним.\n\n"
             "Если студенту просто выдали новую карту, лучше «Заменить карту…»: "
@@ -1187,7 +1187,7 @@ class AttendanceWindow(QMainWindow):
             QMessageBox.warning(self, "Карта не снята", str(exc))
             return
         self.statusBar().showMessage(
-            f"Карта {student.card_code} снята с {student.full_name}", 8000)
+            f"Карта {pretty_code(student.card_code)} снята с {student.full_name}", 8000)
         self._after_card_change()
 
     def _after_card_change(self) -> None:
@@ -1200,11 +1200,12 @@ class AttendanceWindow(QMainWindow):
     def _refresh_pending_cards(self) -> None:
         if not hasattr(self, "pending_card_combo"):
             return
-        selected = self.pending_card_combo.currentText()
+        selected = self.pending_card_combo.currentData()
         self.pending_card_combo.clear()
-        self.pending_card_combo.addItems(self.pending_cards)
+        for code in self.pending_cards:
+            self.pending_card_combo.addItem(pretty_code(code), code)
         if selected in self.pending_cards:
-            self.pending_card_combo.setCurrentText(selected)
+            self.pending_card_combo.setCurrentIndex(self.pending_card_combo.findData(selected))
         count = len(self.pending_cards)
         self.pending_cards_label.setText(
             f"Ожидают привязки: {count}"
