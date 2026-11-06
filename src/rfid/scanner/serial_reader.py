@@ -28,6 +28,10 @@ _RECONNECT_DELAYS = (1, 2, 5, 10)
 # Защита от мусорящего устройства: столько байт без конца строки — сброс.
 _MAX_BUFFER = 4096
 
+# С чего начинаются сообщения о связи: окно показывает их не как обычный статус.
+READER_LOST = "Считыватель недоступен"
+READER_BACK = "Считыватель снова на связи"
+
 
 class _Port(Protocol):
     """Всё, что цикл чтения берёт от порта. Тесты подставляют свою заглушку."""
@@ -101,7 +105,7 @@ class SerialCardReader:
             try:
                 with self._open() as ser:
                     if attempt:
-                        self.on_status(f"Считыватель снова на связи ({self.port}).")
+                        self.on_status(f"{READER_BACK} ({self.port}).")
                     attempt = 0
                     self._serial = ser
                     ser.reset_input_buffer()
@@ -117,10 +121,16 @@ class SerialCardReader:
                 delay = _RECONNECT_DELAYS[min(attempt, len(_RECONNECT_DELAYS) - 1)]
                 attempt += 1
                 self.on_status(
-                    f"Считыватель недоступен ({exc.__class__.__name__}). "
+                    f"{READER_LOST} ({exc.__class__.__name__}). "
                     f"Повтор через {delay} с. Проверьте кабель."
                 )
-                time.sleep(delay)
+                self._pause(delay)
+
+    def _pause(self, seconds: float) -> None:
+        """Пауза, которую можно прервать: «Стоп» не должен ждать десять секунд."""
+        until = time.monotonic() + seconds
+        while time.monotonic() < until and not self._expired():
+            time.sleep(min(READ_TIMEOUT, max(until - time.monotonic(), 0)))
 
     def _read_forever(self, ser: _Port) -> Iterator[Scan]:
         buffer = bytearray()

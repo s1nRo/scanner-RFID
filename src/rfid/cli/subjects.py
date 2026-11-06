@@ -28,6 +28,8 @@ def describe_folder(folder: SubjectFolder) -> str:
             groups.append(f"{parsed.group_name} ({len(parsed.students)})")
         except excel.RosterError:
             groups.append(f"{path.name} — не список")
+        except OSError:
+            groups.append(f"{path.name} — файл занят")
     if len(folder.rosters) > _PREVIEW_GROUPS:
         groups.append(f"и ещё {len(folder.rosters) - _PREVIEW_GROUPS}")
     return ", ".join(groups)

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from .. import journal
-from ..db import Storage, Subject
+from ..db import CardConflict, Storage, Subject
 from ..excel import SubjectFolder, discover_subjects
 from . import common
 from .subjects import nothing_found, subject_by_name
@@ -69,9 +69,28 @@ def cmd_import(args) -> int:
     sync = args.sync or (args.choose and _choose_sync())
 
     with Storage(args.db) as storage:
-        if sync:
-            return _sync(storage, folders, assume_yes=args.yes)
-        return _add_missing(storage, folders)
+        code = (_sync(storage, folders, assume_yes=args.yes) if sync
+                else _add_missing(storage, folders))
+        if not args.yes:
+            _offer_group_moves(storage, args.tables)
+        return code
+
+
+def _offer_group_moves(storage: Storage, tables_dir) -> None:
+    """Группу в файлах переименовали — спросить, те же ли это люди."""
+    moves = journal.renamed_groups(storage, tables_dir)
+    if not moves:
+        return
+    print("\nПохоже, в файлах изменилось название группы:")
+    for move in moves:
+        print(f"   {move.student.full_name}: «{move.student.group_name}» → «{move.new_group}»")
+    if not common.confirm("Это те же люди? Перенести вместе с картами и отметками?"):
+        return
+    for move in moves:
+        try:
+            storage.move_to_group(move.student.id, move.new_group)
+        except CardConflict as exc:
+            print(f"   Не перенесён: {exc}")
 
 
 def _add_missing(storage: Storage, folders: list[SubjectFolder]) -> int:

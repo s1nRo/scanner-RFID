@@ -171,6 +171,19 @@ class TestPortable:
         (flash / H.workdir.PORTABLE_MARKER).unlink()
         assert H.find_home() is None
 
+    def test_beats_a_variable_set_on_this_computer(self, flash, workdir, monkeypatch):
+        # Отметки с флешки не должны уйти в базу из другой папки.
+        monkeypatch.setenv(H.HOME_ENV, str(workdir))
+        assert H.find_home() == flash.resolve()
+
+    def test_read_only_flash_is_explained(self, flash, stranger, monkeypatch):
+        def denied(*_a, **_k):
+            raise PermissionError("защищено от записи")
+
+        monkeypatch.setattr(H.tempfile, "TemporaryFile", denied)
+        with pytest.raises(H.Interrupted, match="нельзя записывать"):
+            H.find_home()
+
     def test_not_frozen_ignores_marker(self, flash, stranger, monkeypatch):
         monkeypatch.setattr(H.sys, "frozen", False)
         assert H.workdir.portable_folder() is None

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -25,6 +26,8 @@ from .save import save_atomically
 LATE_FILL = PatternFill(fill_type="solid", fgColor="FFFFFF00")
 
 _DATE_COLUMN_WIDTH = 7
+_FULL_DATE_FORMAT = "%d.%m.%Y"
+_NO_YEAR = date(2400, 12, 31)
 
 
 # -------------------------------------------------------------------- запись
@@ -35,12 +38,17 @@ def write_attendance(
     marks: dict[date, dict[str, datetime]],
     *,
     absent_mark: str = ABSENT_MARK,
+    lesson_times: Mapping[date, Iterable[datetime]] | None = None,
 ) -> Path:
     """Проставить отметки в файле группы, сохранив его оформление.
 
-    marks: дата -> {ФИО: время прихода}, общий на предмет, со всеми группами.
-    ФИО сверяются без учёта регистра и «ё». Имена, которых нет в списке,
-    молча не теряются — их возвращает сверка через unmatched_names().
+    marks: дата -> {ФИО: время прихода}. ФИО сверяются без учёта регистра и «ё».
+    Имена, которых нет в списке, молча не теряются — их возвращает сверка
+    через unmatched_names().
+
+    lesson_times: приходы всего занятия, по всем его группам. Опоздание
+    считается от начала занятия, а не от первого пришедшего из этой группы.
+    Не задано — занятие определяется по самим marks.
     """
     workbook = load_workbook(roster.path, read_only=False)
     try:
@@ -50,12 +58,13 @@ def write_attendance(
         columns = _date_columns(sheet, roster)
 
         for day in sorted(marks):
-            column = columns.get(day.strftime(DATE_HEADER_FORMAT))
+            column = _find_date_column(columns, day)
             if column is None:
                 column = _add_date_column(sheet, roster, columns, day)
 
             # Приходы сначала режутся на занятия — см. lessons.session_starts().
-            starts = session_starts(marks[day].values())
+            times = lesson_times.get(day) if lesson_times else None
+            starts = session_starts(marks[day].values() if times is None else times)
             present = {normalize_name(name): at for name, at in marks[day].items()}
             for student in roster.students:
                 at = present.get(normalize_name(student.full_name))
@@ -78,6 +87,47 @@ def write_attendance(
     finally:
         workbook.close()
     return roster.path
+
+
+def clear_marks(
+    roster: Roster,
+    full_name: str,
+    times: Iterable[datetime],
+    *,
+    today: date | None = None,
+    absent_mark: str = ABSENT_MARK,
+) -> int:
+    """Убрать у студента приходы, поставленные этими отметками. Вернуть, сколько.
+
+    Только ячейка, где стоит ровно это время: другое время или непонятное
+    вписал человек, это не трогаем. Нечего убирать — файл не перезаписываем.
+    """
+    key = normalize_name(full_name)
+    student = next((s for s in roster.students if normalize_name(s.full_name) == key), None)
+    wanted = {at.date(): at for at in times}
+    if student is None or not wanted:
+        return 0
+    today = today or date.today()
+    workbook = load_workbook(roster.path)
+    try:
+        sheet = workbook[roster.sheet_title]
+        cleared = 0
+        for col in range(roster.first_date_col, sheet.max_column + 1):
+            day = header_date(sheet.cell(row=roster.header_row, column=col).value, today)
+            at = wanted.get(day) if day else None
+            cell = sheet.cell(row=student.row, column=col)
+            if at is None or not isinstance(cell, Cell):
+                continue
+            if cell_time(cell.value) == at.time().replace(second=0, microsecond=0):
+                cell.value = absent_mark
+                if cell.fill == LATE_FILL:
+                    cell.fill = PatternFill()
+                cleared += 1
+        if cleared:
+            save_atomically(workbook, roster.path)
+        return cleared
+    finally:
+        workbook.close()
 
 
 def _unmerge_header(sheet: Worksheet, row: int, from_col: int) -> None:
@@ -103,15 +153,53 @@ def _free_cell(sheet: Worksheet, row: int, col: int) -> None:
 
 
 def _date_columns(sheet: Worksheet, roster: Roster) -> dict[str, int]:
-    """Какие даты уже есть в шапке и в каких колонках."""
+    """Какие даты уже есть в шапке и в каких колонках.
+
+    Заголовок понимаем так же, как чтение (header_date): «7.11» и «07.11.2026» —
+    тот же день, что наш «07.11». Иначе рядом появлялась вторая колонка, а
+    синхронизация принимала пустую первую за прочерк и объявляла отметку удалённой.
+
+    Ключ — «дд.мм» или, если год указан явно, «дд.мм.гггг»: чужой год не совпадёт.
+    """
     found: dict[str, int] = {}
     for col in range(roster.first_date_col, sheet.max_column + 1):
         value = sheet.cell(row=roster.header_row, column=col).value
-        if isinstance(value, str) and value.strip():
-            found[value.strip()] = col
-        elif isinstance(value, datetime):
-            found[value.strftime(DATE_HEADER_FORMAT)] = col
+        if isinstance(value, date):  # datetime тоже
+            found.setdefault(value.strftime(_FULL_DATE_FORMAT), col)
+            found.setdefault(value.strftime(DATE_HEADER_FORMAT), col)
+        elif isinstance(value, str) and value.strip():
+            # Год-заглушка високосный: иначе «29.02» без года не разобрать.
+            day = header_date(value, _NO_YEAR)
+            if day is None:
+                found.setdefault(value.strip(), col)
+            elif day.year == _NO_YEAR.year:
+                found.setdefault(day.strftime(DATE_HEADER_FORMAT), col)
+            else:
+                found.setdefault(day.strftime(_FULL_DATE_FORMAT), col)
     return found
+
+
+def _find_date_column(columns: dict[str, int], day: date) -> int | None:
+    full = columns.get(day.strftime(_FULL_DATE_FORMAT))
+    return full if full is not None else columns.get(day.strftime(DATE_HEADER_FORMAT))
+
+
+def _first_free_column(sheet: Worksheet, roster: Roster) -> int:
+    """Колонка правее всего, что вписано в шапку или в строки студентов.
+
+    Занятая колонка может быть с заголовком-числом (номер недели) или вовсе
+    без заголовка: там чужие данные, например оценки, вернуть их будет неоткуда.
+    Ширину листа по max_column брать нельзя: шапка бывает объединена до Y.
+    """
+    rows = [roster.header_row, *(student.row for student in roster.students)]
+    last = roster.first_date_col - 1
+    for col in range(roster.first_date_col, sheet.max_column + 1):
+        for row in rows:
+            value = sheet.cell(row=row, column=col).value
+            if value is not None and str(value).strip():
+                last = col
+                break
+    return last + 1
 
 
 def _add_date_column(
@@ -119,7 +207,7 @@ def _add_date_column(
 ) -> int:
     """Завести колонку для нового дня правее всех занятых."""
     title = day.strftime(DATE_HEADER_FORMAT)
-    column = max([*columns.values(), roster.first_date_col - 1]) + 1
+    column = _first_free_column(sheet, roster)
     columns[title] = column
     header = sheet.cell(row=roster.header_row, column=column, value=title)
     header.alignment = Alignment(horizontal="center")

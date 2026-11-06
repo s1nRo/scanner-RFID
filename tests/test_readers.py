@@ -5,7 +5,10 @@
 склеиться с половиной следующей. Парсер это переживать обязан.
 """
 
+import time
+
 import pytest
+import serial
 
 from rfid import scanner
 from rfid.pipeline import Debounce
@@ -29,6 +32,27 @@ def collect(data: bytes, chunk: int) -> list[Scan]:
     except Exhausted:
         pass
     return scans
+
+
+def test_stop_does_not_wait_for_the_reconnect_pause(monkeypatch):
+    """Считыватель выдернут, до повтора десять секунд, а оператор нажал «Стоп»."""
+    said: list[str] = []
+    stop = []
+
+    def lost(_self):
+        raise serial.SerialException("порт занят")
+
+    def on_status(message):
+        said.append(message)
+        stop.append(True)
+
+    monkeypatch.setattr(SerialCardReader, "_open", lost)
+    monkeypatch.setattr("rfid.scanner.serial_reader._RECONNECT_DELAYS", (10,))
+    reader = SerialCardReader("COM_TEST", on_status=on_status, should_stop=lambda: bool(stop))
+    started = time.monotonic()
+    assert list(reader.scans()) == []
+    assert time.monotonic() - started < 2
+    assert said[0].startswith(scanner.READER_LOST)
 
 
 class TestLineFraming:

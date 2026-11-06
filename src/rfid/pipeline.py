@@ -28,6 +28,9 @@ DEFAULT_DEBOUNCE = 2.0
 FAILED = "failed"            # отметку записать не удалось — она потеряна
 SHOW_FAILED = "show_failed"  # записана, но не показалась на экране
 
+# Начало сообщения о потерянной отметке: окно ловит его и кричит громче обычного.
+NOT_SAVED = "!!! НЕ ЗАПИСАНО"
+
 
 @dataclass
 class Debounce:
@@ -83,7 +86,7 @@ def run(
             # Эту отметку записать не вышло — сказать обязаны, она потеряна.
             tally[FAILED] += 1
             view.status(
-                f"!!! НЕ ЗАПИСАНО: карта {scan.code.canonical} "
+                f"{NOT_SAVED}: карта {scan.code.pretty} ({scan.code.canonical}) "
                 f"в {scan.at.strftime('%H:%M:%S')} — {exc}"
             )
             continue

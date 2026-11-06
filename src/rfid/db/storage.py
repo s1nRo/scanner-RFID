@@ -21,7 +21,9 @@ from pathlib import Path
 from ..names import normalize_name
 from ..scanner.codes import CardCode
 from .models import (
+    Arrival,
     CardConflict,
+    CardMark,
     CardReplaced,
     CardTaken,
     DayRow,
@@ -29,6 +31,7 @@ from .models import (
     ImportStatus,
     MarkResult,
     MarkStatus,
+    ReplacePreview,
     Student,
     Subject,
     UnknownCard,
@@ -37,11 +40,22 @@ from .schema import migrate
 
 # Пометка в attendance.raw у отметок, взятых из таблицы, а не с карты.
 IMPORT_RAW = "таблица: "
+# То же у отметки, которую преподаватель поставил в окне, без карты.
+MANUAL_RAW = "GUI: ручная отметка"
+
+# Такие отметки держатся за человека, а не за карту: с картой они не уходят,
+# хотя карта в них может быть проставлена (_stamp_card_on_marks).
+_NOT_BY_CARD = "(COALESCE({t}raw, '') LIKE :imported OR COALESCE({t}raw, '') = :manual)"
+_NOT_BY_CARD_PARAMS = {"imported": f"{IMPORT_RAW}%", "manual": MANUAL_RAW}
 
 # Сколько ждать, если база занята другим процессом, прежде чем сдаться.
 # Пара идёт полтора часа, очередь у считывателя живая — пять секунд
 # ожидания несопоставимы с потерянной отметкой.
 BUSY_TIMEOUT_MS = 5000
+
+
+class _Preview(Exception):
+    """Откатить пробную замену карты."""
 
 
 def _as_student(row: sqlite3.Row) -> Student:
@@ -399,6 +413,17 @@ class Storage:
         self._unbind(student.id)
         return True
 
+    def card_marks_of(self, student_id: int) -> list[CardMark]:
+        """Приходы человека, сделанные картой: при снятии карты они уйдут от него."""
+        rows = self.conn.execute(
+            "SELECT sub.name AS subject_name, a.at FROM attendance a "
+            "JOIN subjects sub ON sub.id = a.subject_id "
+            "WHERE a.student_id = :id AND a.card_code IS NOT NULL "
+            f"AND NOT {_NOT_BY_CARD.format(t='a.')}",
+            {"id": student_id, **_NOT_BY_CARD_PARAMS},
+        )
+        return [CardMark(r["subject_name"], datetime.fromisoformat(r["at"])) for r in rows]
+
     def student_by_id(self, student_id: int) -> Student | None:
         row = self.conn.execute(
             "SELECT * FROM students WHERE id = ?", (student_id,)
@@ -408,7 +433,11 @@ class Storage:
     def replace_card(
         self, student_id: int, code: CardCode | str, *, take: bool = False
     ) -> CardReplaced:
-        """Дать человеку другую карту: потерял, сменил, привязали по ошибке.
+        """Дать человеку другую карту: потерял, выдали новую.
+
+        Не для ошибочной привязки чужой карты: отметки той карты останутся
+        за ним. Там нужен remove_student + bind_card, а если перепутаны две
+        карты — снять обе и привязать заново.
 
         В отличие от remove_student + bind_card его прошлые отметки остаются
         его: карта меняется, человек тот же. Старая карта в них заменяется
@@ -461,6 +490,21 @@ class Storage:
             self._stamp_card_on_marks(updated)
         return CardReplaced(updated, old, moved, owner)
 
+    def preview_replace(
+        self, student_id: int, code: CardCode | str, *, take: bool = False
+    ) -> ReplacePreview:
+        """Посчитать, что сделает replace_card, и откатить. CardTaken — как у неё."""
+        moved = dropped = 0
+        before = self.count_marks()
+        try:
+            with self.transaction():
+                moved = self.replace_card(student_id, code, take=take).moved
+                dropped = before - self.count_marks()
+                raise _Preview
+        except _Preview:
+            pass
+        return ReplacePreview(moved, dropped)
+
     def unbind_all_cards(self) -> None:
         """Снять все привязки карт, не трогая людей и отметки из таблиц."""
         self._unbind(None)
@@ -469,12 +513,13 @@ class Storage:
         """Снять карту с одного человека или, при None, со всех."""
         which = "card_code IS NOT NULL" if student_id is None else "id = :id"
         people = f"SELECT id FROM students WHERE {which}"
-        params = {"id": student_id, "imported": f"{IMPORT_RAW}%"}
+        params = {"id": student_id, **_NOT_BY_CARD_PARAMS}
         with self.transaction():
-            # Отметки из таблиц остаются за человеком: их связь — ФИО, не карта.
+            # Отметки из таблиц и ручные остаются за человеком: карту для них
+            # никто не прикладывал, их связь — сам человек.
             self.conn.execute(
                 f"UPDATE attendance SET card_code = NULL "
-                f"WHERE student_id IN ({people}) AND raw LIKE :imported",
+                f"WHERE student_id IN ({people}) AND {_NOT_BY_CARD.format(t='')}",
                 params,
             )
             self.conn.execute(
@@ -575,6 +620,57 @@ class Storage:
             day = date.fromisoformat(row["day"])
             result.setdefault(day, {})[row["full_name"]] = datetime.fromisoformat(row["at"])
         return result
+
+    def arrivals(self, subject: Subject | int) -> list[Arrival]:
+        """Именные приходы на предмет вместе с группой: тёзки в разных группах —
+        разные люди, и в файл идёт только приход человека из этой группы."""
+        rows = self.conn.execute(
+            "SELECT a.at, s.full_name, s.group_name FROM attendance a "
+            "JOIN students s ON s.id = a.student_id "
+            "WHERE a.subject_id = ? ORDER BY a.day, a.at",
+            (_subject_id(subject),),
+        )
+        return [Arrival(r["full_name"], r["group_name"], datetime.fromisoformat(r["at"]))
+                for r in rows]
+
+    def has_marks(self, student_id: int) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM attendance WHERE student_id = ? LIMIT 1", (student_id,)
+        ).fetchone() is not None
+
+    def move_to_group(self, student_id: int, group_name: str) -> Student:
+        """Группу в файлах переименовали: тот же человек теперь в другой группе.
+
+        Импорт мог уже завести его же в новой группе, без карты: такая запись
+        сливается с этой. Живой приход главнее строки из таблицы за то же занятие,
+        как и в _stamp_card_on_marks. Две разные карты — CardConflict, не угадываем.
+        """
+        group_name = group_name.strip()
+        with self.transaction():
+            student = self.student_by_id(student_id)
+            if student is None:
+                raise ValueError("студент не найден в базе")
+            twin = self.student_by_name(student.full_name, group_name)
+            card = student.card_code
+            if twin is not None and twin.id != student.id:
+                if card and twin.card_code and card != twin.card_code:
+                    raise CardConflict(twin)
+                card = card or twin.card_code
+                self.conn.execute(
+                    "DELETE FROM attendance AS a WHERE a.student_id = :twin AND EXISTS ("
+                    "  SELECT 1 FROM attendance b WHERE b.student_id = :me "
+                    "  AND b.day = a.day AND b.subject_id = a.subject_id)",
+                    {"twin": twin.id, "me": student.id},
+                )
+                self.conn.execute("UPDATE attendance SET student_id = ? WHERE student_id = ?",
+                                  (student.id, twin.id))
+                self.conn.execute("DELETE FROM students WHERE id = ?", (twin.id,))
+            self.conn.execute("UPDATE students SET group_name = ?, card_code = ? WHERE id = ?",
+                              (group_name, card, student.id))
+            moved = Student(student.id, card, student.full_name, group_name)
+            if card:
+                self._stamp_card_on_marks(moved)
+        return moved
 
     def subject_dates(self, subject: Subject | int) -> list[date]:
         rows = self.conn.execute(

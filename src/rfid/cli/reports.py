@@ -7,6 +7,7 @@ from datetime import date
 from .. import excel
 from ..db import Storage
 from ..excel import discover_subjects
+from ..journal import CardFilesBusy, roster_people, rows_of_folder, stats_of, unbind_card
 from ..lessons import LATE_AFTER, late_arrivals
 from ..scanner import CardCode, CardCodeError, parse_manual, pretty_code, short_form
 from . import common
@@ -30,14 +31,17 @@ def cmd_report(args) -> int:
         print(f"{folder.name} — {day.strftime(DATE_INPUT)}")
         print(_RULE)
         print(f"{'ФИО':<38} {'Группа':<16} {'Время':<8} Статус")
-        for row in storage.day_rows(day, subject, args.group):
+        # Только люди из списков этого предмета — как в окне. Иначе чужая группа
+        # числилась бы «НЕ отметился» и портила статистику.
+        rows = rows_of_folder(storage.day_rows(day, subject, args.group), roster_people(folder))
+        for row in rows:
             time_text = row.at.strftime("%H:%M") if row.at else "—"
             status = "отметился" if row.at else "НЕ отметился"
             print(f"{row.student.full_name:<38} {row.student.group_name:<16} "
                   f"{time_text:<8} {status}")
 
         print(_RULE)
-        for stat in storage.group_stats(day, subject):
+        for stat in stats_of(rows):
             print(f"{stat.group_name or '(без группы)':<16} "
                   f"{stat.present}/{stat.total}  ({stat.percent:.0f}%)")
 
@@ -63,8 +67,8 @@ def cmd_late(args) -> int:
 
         # Только именные приходы — ровно те, что попадают в файлы групп,
         # чтобы список совпадал с жёлтой подсветкой в таблице.
-        arrivals = {row.student: row.at for row in storage.day_rows(day, subject)
-                    if row.at is not None}
+        rows = rows_of_folder(storage.day_rows(day, subject), roster_people(folder))
+        arrivals = {row.student: row.at for row in rows if row.at is not None}
     late = late_arrivals(arrivals)
 
     minutes = int(LATE_AFTER.total_seconds() // 60)
@@ -109,6 +113,8 @@ def cmd_subjects(args) -> int:
                 print(f"   {parsed.group_name:<18} {len(parsed.students):>3} чел.   {path.name}")
             except excel.RosterError as exc:
                 print(f"   {path.name}: {exc}")
+            except OSError as exc:
+                print(f"   {path.name}: файл занят или недоступен ({exc.strerror or exc})")
     report_misplaced(args.tables)
     return 0
 
@@ -135,8 +141,15 @@ def cmd_students(args) -> int:
     with Storage(args.db) as storage:
         if args.students_action == "remove":
             code = _card_to_remove(storage, args.code)
-            removed = code is not None and storage.remove_student(code)
-            print("Привязка снята." if removed else "Такой карты нет.")
+            student = storage.find_student(code) if code is not None else None
+            if student is None:
+                print("Такой карты нет.")
+                return 0
+            try:
+                unbind_card(storage, student, args.tables)
+            except CardFilesBusy as exc:
+                raise Interrupted(str(exc)) from None
+            print("Привязка снята.")
             return 0
 
         students = storage.list_students(with_card=True)

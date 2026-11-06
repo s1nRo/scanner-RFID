@@ -84,26 +84,36 @@ def read_roster(path: str | Path) -> Roster:
             f"{path.name} не открывается как таблица Excel ({type(exc).__name__}: {exc})"
         ) from exc
     try:
-        sheet = workbook.active
-        if not isinstance(sheet, Worksheet):
-            raise RosterError(f"в {path.name} активный лист — не таблица")
-
-        header_row, name_col = _detect_header(sheet)
-        students = _read_students(sheet, header_row, name_col)
-        if not students:
-            raise RosterError(f"в {path.name} не нашлось ни одного студента")
-
-        return Roster(
-            path=path,
-            sheet_title=sheet.title,
-            group_name=_detect_group(sheet, header_row, fallback=path.stem),
-            header_row=header_row,
-            name_col=name_col,
-            first_date_col=name_col + 1,
-            students=students,
-        )
+        # Активный лист — первым, но не только он: Excel сохраняет книгу открытой
+        # на том листе, где закончили работу, и список не должен от этого исчезать.
+        active = workbook.active
+        sheets = [sheet for sheet in [active, *workbook.worksheets]
+                  if isinstance(sheet, Worksheet)]
+        first_error: RosterError | None = None
+        for sheet in dict.fromkeys(sheets):
+            try:
+                return _read_sheet(path, sheet)
+            except RosterError as exc:
+                first_error = first_error or exc
+        raise first_error or RosterError(f"в {path.name} нет листа с таблицей")
     finally:
         workbook.close()
+
+
+def _read_sheet(path: Path, sheet: Worksheet) -> Roster:
+    header_row, name_col = _detect_header(sheet)
+    students = _read_students(sheet, header_row, name_col)
+    if not students:
+        raise RosterError(f"в {path.name} не нашлось ни одного студента")
+    return Roster(
+        path=path,
+        sheet_title=sheet.title,
+        group_name=_detect_group(sheet, header_row, fallback=path.stem),
+        header_row=header_row,
+        name_col=name_col,
+        first_date_col=name_col + 1,
+        students=students,
+    )
 
 
 def unmatched_names(roster: Roster, names: list[str]) -> list[str]:

@@ -145,6 +145,20 @@ class TestFindPackage:
         make_package(tmp_path / "b" / "driver" / "Y")
         assert D.find_package([None, tmp_path / "a", tmp_path / "b"]) == first.resolve()
 
+    def test_old_sha1_package_is_not_preferred(self, tmp_path):
+        make_package(tmp_path / "driver" / "DRV_Win_All")
+        good = make_package(tmp_path / "driver" / "CDM_2.12.36.20")
+        assert D.find_package([tmp_path]) == good.resolve()
+
+    def test_version_is_a_number_not_text(self, tmp_path):
+        make_package(tmp_path / "driver" / "CDM_2.12.9")
+        newest = make_package(tmp_path / "driver" / "CDM_2.12.36")
+        assert D.find_package([tmp_path]) == newest.resolve()
+
+    def test_only_old_package_is_better_than_nothing(self, tmp_path):
+        old = make_package(tmp_path / "driver" / "DRV_Win_All")
+        assert D.find_package([tmp_path]) == old.resolve()
+
     def test_nothing(self, tmp_path):
         assert D.find_package([tmp_path, None]) is None
 

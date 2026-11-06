@@ -11,8 +11,8 @@ from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 from .. import pipeline
 from ..db import MarkResult, Storage
 from ..excel import SubjectFolder
-from ..journal import fill_subject
-from ..scanner import ReaderUnavailable, Scan, make_reader
+from ..journal import fill_problems, fill_subject
+from ..scanner import READER_BACK, READER_LOST, ReaderUnavailable, Scan, make_reader
 from .gate import ScanGate
 
 
@@ -22,6 +22,11 @@ class ScanWorker(QObject):
     mark_received = pyqtSignal(object)
     # Карту приложили, пока ждём привязки незнакомой, — не принята.
     rejected = pyqtSignal(object)
+    # Отметку записать не удалось: студент уйдёт, думая, что отмечен.
+    not_saved = pyqtSignal(str)
+    # Связь со считывателем: пока её нет, карты не читаются.
+    reader_lost = pyqtSignal(str)
+    reader_ready = pyqtSignal(str)
     status_changed = pyqtSignal(str)
     failed = pyqtSignal(str)
     export_finished = pyqtSignal(str)
@@ -44,6 +49,9 @@ class ScanWorker(QObject):
         self.debounce = debounce
         self._stop = Event()
         self._gate: ScanGate | None = None
+        # Что сказать человеку в конце сеанса. Список, а не сигнал: при закрытии
+        # окна очередь сигналов уже никто не разберёт, а прочитать его можно.
+        self.problems: list[str] = []
 
     def stop(self) -> None:
         self._stop.set()
@@ -57,7 +65,15 @@ class ScanWorker(QObject):
         self.rejected.emit(scan)
 
     def status(self, message: str) -> None:
-        self.status_changed.emit(message)
+        if message.startswith(pipeline.NOT_SAVED):
+            self.problems.append(message)
+            self.not_saved.emit(message)
+        elif message.startswith(READER_LOST):
+            self.reader_lost.emit(message)
+        elif message.startswith(READER_BACK):
+            self.reader_ready.emit(message)
+        else:
+            self.status_changed.emit(message)
 
     def show(self, result: MarkResult) -> None:
         # Заслонка закрывается здесь, в потоке считывателя, до чтения следующей
@@ -77,17 +93,19 @@ class ScanWorker(QObject):
                 on_status=self.status,
                 should_stop=self._stop.is_set,
             )
-            self.status_changed.emit(f"Считыватель подключён: {reader.description}")
+            self.reader_ready.emit(f"Считыватель подключён: {reader.description}")
             self._gate = ScanGate(reader, self._reject)
             with Storage(self.db_path) as storage:
                 subject = storage.get_or_create_subject(self.folder.name)
                 try:
-                    tally = pipeline.run(
+                    # Счётчик снаружи: ошибка порта не должна обнулить потерянные.
+                    pipeline.run(
                         self._gate,
                         storage,
                         self,
                         subject,
                         debounce=self.debounce,
+                        tally=tally,
                     )
                 finally:
                     # Даже ошибка порта не должна оставить уже принятые отметки
@@ -95,7 +113,11 @@ class ScanWorker(QObject):
                     self.status_changed.emit("Сохраняем отметки в таблицы…")
                     results = fill_subject(storage, subject, self.folder)
                     errors = [result for result in results if not result.ok]
-                    if errors:
+                    self.problems += fill_problems(results)
+                    lost = tally[pipeline.FAILED]
+                    if lost:
+                        self.export_finished.emit(f"НЕ ЗАПИСАНО отметок: {lost}")
+                    elif errors:
                         self.export_finished.emit(
                             "Отметки в базе сохранены, но не обновлено файлов: "
                             f"{len(errors)}"

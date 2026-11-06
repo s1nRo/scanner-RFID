@@ -14,8 +14,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Pillow здесь, а не в общих зависимостях, потому что у MSYS-сборки Python нет
+# его колёс, как и PyQt5. Без него openpyxl молча выбрасывает рисунки из файла
+# группы при записи. install.cmd и build-exe.cmd ставят этот extra.
 gui = [
     "PyQt5>=5.15.10",
+    "Pillow>=10",
 ]
 # Проверка типов: python -m pyright. Нужен установленный Node.js.
 # ruff сюда не входит: под MSYS-сборку Python его колёс нет — запускайте

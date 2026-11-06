@@ -43,7 +43,8 @@ def db(tmp_path):
 
 
 def remove(db, code):
-    cmd_students(Namespace(db=db, students_action="remove", code=code))
+    cmd_students(Namespace(db=db, tables=db.parent / "tables", students_action="remove",
+                           code=code))
 
 
 def bound(db, *pairs):

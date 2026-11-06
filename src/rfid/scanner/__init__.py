@@ -34,10 +34,11 @@ from .ports import (
     find_reader_port,
     no_port_explanation,
 )
-from .serial_reader import SerialCardReader
+from .serial_reader import READER_BACK, READER_LOST, SerialCardReader
 
 __all__ = [
-    "KNOWN_PIDS", "MODES", "NO_CARD", "PID_FTDI", "PID_IRONLOGIC", "VID",
+    "KNOWN_PIDS", "MODES", "NO_CARD", "PID_FTDI", "PID_IRONLOGIC", "READER_BACK", "READER_LOST",
+    "VID",
     "CardCode", "CardCodeError", "CardReader", "KeyboardCardReader", "MockCardReader",
     "PortInfo", "ReaderUnavailable", "Scan", "SerialCardReader",
     "available_ports", "driver", "find_reader_port", "make_reader",

@@ -31,13 +31,22 @@ from PyQt5.QtWidgets import (
 )
 
 from ..db import Student, UnknownCard
-from ..scanner import CardCodeError, ReaderUnavailable, make_reader, parse_manual, pretty_code
+from ..scanner import (
+    READER_LOST,
+    CardCodeError,
+    ReaderUnavailable,
+    make_reader,
+    parse_manual,
+    pretty_code,
+)
 
 
 class CardGrabber(QObject):
     """Прочитать одну карту со считывателя вне GUI-потока."""
 
     got = pyqtSignal(str)
+    # Порт занят или считыватель выдернули: иначе окно молча ждало бы вечно.
+    status = pyqtSignal(str)
     failed = pyqtSignal(str)
     finished = pyqtSignal()
 
@@ -53,7 +62,8 @@ class CardGrabber(QObject):
     @pyqtSlot()
     def run(self) -> None:
         try:
-            reader = make_reader(self.mode, port=self.port, should_stop=self._stop.is_set)
+            reader = make_reader(self.mode, port=self.port, on_status=self.status.emit,
+                                 should_stop=self._stop.is_set)
             for scan in reader.scans():
                 self.got.emit(scan.code.canonical)
                 break
@@ -164,12 +174,16 @@ class ReplaceCardDialog(QDialog):
         grabber.moveToThread(thread)
         thread.started.connect(grabber.run)
         grabber.got.connect(self._card_read)
+        grabber.status.connect(self._reader_said)
         grabber.failed.connect(lambda text: self._say(text, error=True))
         grabber.finished.connect(thread.quit)
         grabber.finished.connect(grabber.deleteLater)
         thread.finished.connect(self._reading_done)
         self._thread, self._grabber = thread, grabber
         thread.start()
+
+    def _reader_said(self, text: str) -> None:
+        self._say(text, error=text.startswith(READER_LOST))
 
     def _card_read(self, code: str) -> None:
         self._pick(code)

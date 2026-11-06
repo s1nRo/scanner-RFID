@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox  # noqa: E402
 from rfid.db import Storage, UnknownCard  # noqa: E402
 from rfid.gui import app as gui_app  # noqa: E402
 from rfid.gui import card_dialog  # noqa: E402
+from rfid.journal import CardFilesBusy  # noqa: E402
 from rfid.scanner import MockCardReader  # noqa: E402
 from tests.helpers import ROSTER_NAMES, card, make_roster_file, must  # noqa: E402
 
@@ -113,6 +114,66 @@ def test_taken_card_refused_changes_nothing(window, monkeypatch):
     answer(monkeypatch, QMessageBox.No)
     window._replace_card_of_selected()
     assert must(owner_of(window, NEW)).id == petr.id
+    assert must(owner_of(window, OLD)).id == ivan.id
+
+
+def test_foreign_card_with_marks_asks_first(window, monkeypatch):
+    """Чужую неизвестную карту выбрали по ошибке — «Нет» не должно ничего менять."""
+    ivan = student(window, ROSTER_NAMES[0], OLD)
+    with Storage(window.db_path) as storage:
+        subject = storage.get_or_create_subject("Предмет")
+        storage.mark(OLD, subject, at=datetime(2026, 11, 2, 9))
+        storage.mark(NEW, subject, at=datetime(2026, 11, 2, 9, 5))
+        storage.mark(NEW, subject, at=datetime(2026, 11, 3, 9))
+    monkeypatch.setattr(window, "_selected_student", lambda: ivan)
+    choose_in_dialog(monkeypatch, NEW.canonical)
+    asked = answer(monkeypatch, QMessageBox.No)
+    window._replace_card_of_selected()
+    assert len(asked) == 1
+    assert ": 1." in asked[0] and "(1)" in asked[0]  # перейдёт одна, удалится одна
+    assert "насовсем" in asked[0]
+    assert must(owner_of(window, OLD)).id == ivan.id
+    with Storage(window.db_path) as storage:
+        assert storage.count_marks() == 3
+
+
+def test_foreign_card_confirmed_is_replaced(window, monkeypatch):
+    ivan = student(window, ROSTER_NAMES[0], OLD)
+    with Storage(window.db_path) as storage:
+        storage.mark(NEW, storage.get_or_create_subject("Предмет"), at=datetime(2026, 11, 3, 9))
+    monkeypatch.setattr(window, "_selected_student", lambda: ivan)
+    choose_in_dialog(monkeypatch, NEW.canonical)
+    answer(monkeypatch, QMessageBox.Yes)
+    window._replace_card_of_selected()
+    assert must(owner_of(window, NEW)).id == ivan.id
+
+
+def test_take_warns_about_swapped_cards(window, monkeypatch):
+    ivan = student(window, ROSTER_NAMES[0], OLD)
+    student(window, ROSTER_NAMES[1], NEW)
+    monkeypatch.setattr(window, "_selected_student", lambda: ivan)
+    choose_in_dialog(monkeypatch, NEW.canonical)
+    asked = answer(monkeypatch, QMessageBox.No)
+    window._replace_card_of_selected()
+    assert "перепутаны" in asked[0]
+
+
+def test_tooltip_does_not_send_wrong_binding_to_replace(window):
+    assert "Снять карту" in window.replace_card_button.toolTip()
+    assert "или привязали не ту" not in window.replace_card_button.toolTip()
+
+
+def test_unbind_with_file_open_keeps_the_card(window, monkeypatch):
+    ivan = student(window, ROSTER_NAMES[0], OLD)
+    monkeypatch.setattr(window, "_selected_student", lambda: ivan)
+    answer(monkeypatch, QMessageBox.Yes)
+
+    def busy(*_args, **_kwargs):
+        raise CardFilesBusy(window.tables_path / "group.xlsx")
+
+    monkeypatch.setattr(gui_app, "unbind_card", busy)
+    window._unbind_card_of_selected()
+    assert window.shown == ["warning"]
     assert must(owner_of(window, OLD)).id == ivan.id
 
 

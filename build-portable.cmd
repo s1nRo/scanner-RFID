@@ -25,9 +25,14 @@ set "OUT=dist\RFID-Portable"
 if exist "%OUT%" rmdir /s /q "%OUT%"
 mkdir "%OUT%\tables"
 if errorlevel 1 exit /b 1
+REM Without portable.txt the exe behaves as a regular one and may open the
+REM database remembered in the registry, so every copy has to be checked.
 copy /y "dist\RFID-Scanner.exe" "%OUT%\" >nul
+if errorlevel 1 exit /b 1
 copy /y "packaging\portable\portable.txt" "%OUT%\portable.txt" >nul
+if errorlevel 1 exit /b 1
 copy /y "packaging\portable\README.txt" "%OUT%\README.txt" >nul
+if errorlevel 1 exit /b 1
 xcopy /e /i /q /y "%DRV%" "%OUT%\driver\%DRVNAME%" >nul
 if errorlevel 1 exit /b 1
 

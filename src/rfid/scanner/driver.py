@@ -70,11 +70,20 @@ def find_package(bases: Iterable[Path | None]) -> Path | None:
                 return candidate.resolve()
         holder = base / DRIVER_DIR
         if holder.is_dir():
-            found = sorted((d for d in holder.iterdir() if d.is_dir() and is_package(d)),
-                           key=lambda d: d.name, reverse=True)
+            found = [d for d in holder.iterdir() if d.is_dir() and is_package(d)]
             if found:
-                return found[0].resolve()
+                return max(found, key=_package_rank).resolve()
     return None
+
+
+def _package_rank(folder: Path) -> tuple[bool, tuple[int, ...]]:
+    """Какой пакет лучше: CDM раньше прочих, затем по номеру версии, а не по тексту.
+
+    Пакет DRV_Win_All подписан по SHA-1, и Windows его отвергает, а как текст
+    он «новее» CDM. И CDM_2.12.9 по тексту «новее» CDM_2.12.36.
+    """
+    return (folder.name.upper().startswith("CDM"),
+            tuple(int(part) for part in re.findall(r"\d+", folder.name)))
 
 
 def default_bases(home: Path | None = None) -> list[Path | None]:

@@ -7,6 +7,7 @@ import stat
 import sys
 import tempfile
 import threading
+import traceback
 from datetime import date, datetime
 from pathlib import Path
 
@@ -38,17 +39,27 @@ from PyQt5.QtWidgets import (
 
 from .. import enrollment, workdir
 from ..db import (
+    MANUAL_RAW,
     CardConflict,
     CardTaken,
     ImportStatus,
     MarkResult,
     MarkStatus,
+    ReplacePreview,
     Storage,
     Student,
 )
 from ..enrollment import Candidate
 from ..excel import RosterError, SubjectFolder, discover_subjects
-from ..journal import fill_subject, import_subject
+from ..journal import (
+    fill_all,
+    fill_problems,
+    fill_subject,
+    import_subject,
+    renamed_groups,
+    retract_card_marks,
+    unbind_card,
+)
 from ..scanner import driver, find_reader_port, pretty_code
 from ..workdir import DB_FILE, TABLES_DIR
 from .binding import BindDialog, error_beep
@@ -77,6 +88,13 @@ class AttendanceWindow(QMainWindow):
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanWorker | None = None
         self.pending_cards: list[str] = []
+        self.session_problems: list[str] = []
+        self._reader_is_lost = False
+        # Оператор сказал, что это не те же люди, — не спрашивать снова за сеанс.
+        self._declined_moves: set[int] = set()
+        # Поле времени не трогали: отметка ставится на «сейчас», а не на момент,
+        # когда окно открылось. Окно живёт часами, а иногда и сутками.
+        self._manual_time_touched = False
         self.bind_dialog: BindDialog | None = None
         # Драйвер поставили из окна — запустить сканирование, когда поток закроется.
         self._restart_scanning = False
@@ -102,7 +120,8 @@ class AttendanceWindow(QMainWindow):
         self.pages.addTab(self._build_scan_page(), "Сканирование")
         self.pages.addTab(self._build_attendance_page(), "Посещаемость")
         self.pages.addTab(self._build_late_page(), "Опоздавшие")
-        self.pages.addTab(self._build_students_page(), "Студенты и карты")
+        self.students_page = self._build_students_page()
+        self.pages.addTab(self.students_page, "Студенты и карты")
         self.pages.currentChanged.connect(self._show_page)
         root_layout.addWidget(self.pages, 1)
         self.setCentralWidget(root)
@@ -134,6 +153,9 @@ class AttendanceWindow(QMainWindow):
         self.workspace_button = QPushButton("Папка данных…")
         self.workspace_button.setToolTip(str(self.tables_path.parent))
         self.workspace_button.clicked.connect(self._choose_workspace)
+        # На флешке папку задаёт метка: выбор продержался бы только до закрытия,
+        # и отметки сеанса «пропали» бы при следующем запуске.
+        self.workspace_button.setVisible(workdir.portable_folder() is None)
         layout.addWidget(self.workspace_button)
         return bar
 
@@ -295,6 +317,13 @@ class AttendanceWindow(QMainWindow):
         self.reload_roster_button = QPushButton("Загрузить изменения")
         self.reload_roster_button.clicked.connect(self._reload_rosters)
         roster_controls.addWidget(self.reload_roster_button)
+        self.write_tables_button = QPushButton("Записать в таблицы")
+        self.write_tables_button.setToolTip(
+            "Записать отметки из базы в файлы групп всех предметов. Нужно, если при "
+            "остановке файл был открыт в Excel: закройте его и нажмите эту кнопку."
+        )
+        self.write_tables_button.clicked.connect(self._write_tables)
+        roster_controls.addWidget(self.write_tables_button)
         layout.addLayout(roster_controls)
 
         self.students_table = QTableWidget(0, 4)
@@ -319,6 +348,7 @@ class AttendanceWindow(QMainWindow):
         self.manual_datetime = QDateTimeEdit(QDateTime.currentDateTime())
         self.manual_datetime.setCalendarPopup(True)
         self.manual_datetime.setDisplayFormat("dd.MM.yyyy HH:mm")
+        self.manual_datetime.dateTimeChanged.connect(self._manual_time_edited)
         manual_layout.addWidget(self.manual_datetime)
         self.manual_mark_button = QPushButton("Поставить отметку")
         self.manual_mark_button.clicked.connect(self._mark_selected_student)
@@ -330,14 +360,17 @@ class AttendanceWindow(QMainWindow):
         card_layout = QHBoxLayout(card_group)
         self.replace_card_button = QPushButton("Заменить карту…")
         self.replace_card_button.setToolTip(
-            "Потерял карту, выдали новую или привязали не ту: прошлые отметки "
-            "останутся за студентом"
+            "Потерял карту или выдали новую: прошлые отметки останутся за студентом.\n"
+            "Привязали чужую карту по ошибке — это «Снять карту», иначе её отметки "
+            "останутся за этим студентом."
         )
         self.replace_card_button.clicked.connect(self._replace_card_of_selected)
         card_layout.addWidget(self.replace_card_button)
         self.unbind_card_button = QPushButton("Снять карту")
         self.unbind_card_button.setToolTip(
-            "Студент останется без карты; отметки этой картой вернутся в неизвестные"
+            "Студент останется без карты; отметки этой картой вернутся в неизвестные "
+            "и уйдут из файлов групп. Так исправляют ошибочную привязку; если перепутаны "
+            "две карты — снимите обе и привяжите заново."
         )
         self.unbind_card_button.clicked.connect(self._unbind_card_of_selected)
         card_layout.addWidget(self.unbind_card_button)
@@ -374,7 +407,18 @@ class AttendanceWindow(QMainWindow):
 
     # --------------------------------------------------------------- navigation
 
+    def _manual_time_edited(self, _value: QDateTime) -> None:
+        self._manual_time_touched = True
+
+    def _reset_manual_time(self) -> None:
+        self.manual_datetime.blockSignals(True)
+        self.manual_datetime.setDateTime(QDateTime.currentDateTime())
+        self.manual_datetime.blockSignals(False)
+        self._manual_time_touched = False
+
     def _show_page(self, index: int) -> None:
+        if self.pages.widget(index) is self.students_page and not self._manual_time_touched:
+            self._reset_manual_time()
         if index == 0:
             self.page_subtitle.setText(self._date_text(date.today()))
         elif index == 1:
@@ -411,7 +455,8 @@ class AttendanceWindow(QMainWindow):
             self.subject_combo.setEnabled(False)
             self.hero_title.setText("Нет списков групп")
             self.hero_hint.setText(
-                f"Создайте папку предмета в {self.tables_path} и положите туда .xlsx"
+                f"Создайте папку предмета в {self.tables_path}, положите туда .xlsx и нажмите "
+                "«Загрузить изменения» на вкладке «Студенты и карты»"
             )
             self.statusBar().showMessage("В папке tables не найдены предметы")
 
@@ -424,6 +469,7 @@ class AttendanceWindow(QMainWindow):
         self._refresh_pending_cards()
         self.session_subject.setText(folder.name)
         self._import_roster(folder)
+        self._offer_group_moves()
         self._refresh_today()
         self._refresh_report()
 
@@ -441,6 +487,7 @@ class AttendanceWindow(QMainWindow):
         self.db_path = home / DB_FILE
         self.tables_path = home / TABLES_DIR
         self.pending_cards.clear()
+        self._declined_moves.clear()
         self._load_subjects()
         self.statusBar().showMessage(f"Папка данных: {home}", 8000)
 
@@ -461,7 +508,9 @@ class AttendanceWindow(QMainWindow):
         self.roster_file_combo.setEnabled(enabled)
         self.view_roster_button.setEnabled(enabled)
         self.edit_roster_button.setEnabled(enabled)
-        self.reload_roster_button.setEnabled(folder is not None)
+        # Без предметов кнопка особенно нужна: так видна только что созданная папка.
+        self.reload_roster_button.setEnabled(True)
+        self.write_tables_button.setEnabled(folder is not None)
 
     def _selected_roster_path(self) -> Path | None:
         value = self.roster_file_combo.currentData()
@@ -540,33 +589,101 @@ class AttendanceWindow(QMainWindow):
             self._load_subjects()
             return
         self.folders = refreshed
+        # Список предметов обязан совпасть с папками: новый предмет должен быть
+        # виден, а выбор остаётся тем же предметом, на какой бы строке он ни оказался.
+        self.subject_combo.blockSignals(True)
+        self.subject_combo.clear()
+        self.subject_combo.addItems([item.name for item in refreshed])
+        self.subject_combo.setCurrentText(subject_name)
+        self.subject_combo.blockSignals(False)
         self._refresh_roster_files(folder)
-        self._import_roster(folder)
+        problems = self._import_roster(folder)
+        self._offer_group_moves()
         self._refresh_today()
         self._refresh_report()
-        self.statusBar().showMessage(
-            "Изменения загружены. Новые студенты добавлены без карты.", 8000
-        )
+        if problems:
+            QMessageBox.warning(self, "Загружено не всё", "\n\n".join(problems))
+        else:
+            self.statusBar().showMessage(
+                "Изменения загружены. Новые студенты добавлены без карты.", 8000
+            )
 
-    def _import_roster(self, folder: SubjectFolder) -> None:
-        """Добавить в БД людей и ручные отметки из таблиц без удаления данных."""
+    def _import_roster(self, folder: SubjectFolder) -> list[str]:
+        """Добавить в БД людей и ручные отметки из таблиц без удаления данных.
+
+        Вернуть, что сказать человеку: какие файлы не прочитались и какие ячейки
+        не поняты. Такие ячейки не угадываем: студент числится отсутствующим.
+        """
+        problems: list[str] = []
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             with Storage(self.db_path) as storage:
                 results = import_subject(storage, folder)
-            errors = [result for result in results if not result.ok]
-            if errors:
+            for result in results:
+                if not result.ok:
+                    problems.append(f"{result.path.name}: {result.error}")
+                problems += [
+                    f"{result.path.name}: не понял ячейку «{value}» ({where}), "
+                    "оставлена как есть, отметка не поставлена"
+                    for where, value in result.skipped
+                ]
+            if problems:
                 self.statusBar().showMessage(
-                    f"Не удалось прочитать файлов групп: {len(errors)}", 7000
+                    f"Вопросов по файлам групп: {len(problems)}. "
+                    "Подробности — кнопка «Загрузить изменения».", 7000
                 )
         except Exception as exc:
-            self.statusBar().showMessage(f"Не удалось обновить список студентов: {exc}", 7000)
+            problems.append(f"Не удалось обновить список студентов: {exc}")
+            self.statusBar().showMessage(problems[-1], 7000)
         finally:
             QApplication.restoreOverrideCursor()
+        return problems
+
+    def _offer_group_moves(self) -> None:
+        """Группу в файлах переименовали: спросить, те же ли это люди.
+
+        Сами не переносим: человек с тем же ФИО может оказаться тёзкой.
+        Без переноса он остаётся без карты и отметок в окне, а в файле — прочерк.
+        """
+        try:
+            with Storage(self.db_path) as storage:
+                moves = [move for move in renamed_groups(storage, self.tables_path, cached_roster)
+                         if move.student.id not in self._declined_moves]
+                if not moves:
+                    return
+                lines = "\n".join(
+                    f"{move.student.full_name}: «{move.student.group_name}» → «{move.new_group}»"
+                    for move in moves[:15]
+                )
+                more = f"\n… и ещё {len(moves) - 15}" if len(moves) > 15 else ""
+                answer = QMessageBox.question(
+                    self,
+                    "Изменилось название группы?",
+                    f"Этих людей больше нет в их группе, но в файлах есть то же ФИО "
+                    f"в другой:\n\n{lines}{more}\n\nЭто те же люди? Перенести их вместе "
+                    "с картами и отметками?\n\nЕсли это тёзки, нажмите «Нет».",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if answer != QMessageBox.Yes:
+                    self._declined_moves.update(move.student.id for move in moves)
+                    return
+                failed = []
+                for move in moves:
+                    try:
+                        storage.move_to_group(move.student.id, move.new_group)
+                    except CardConflict as exc:
+                        failed.append(str(exc))
+        except Exception as exc:  # noqa: BLE001 — сказать, не терять молча
+            QMessageBox.warning(self, "Группа не перенесена", str(exc))
+            return
+        if failed:
+            QMessageBox.warning(self, "Перенесены не все", "\n".join(failed))
 
     def _current_folder(self) -> SubjectFolder | None:
-        index = self.subject_combo.currentIndex()
-        return self.folders[index] if 0 <= index < len(self.folders) else None
+        # По имени, а не по номеру строки: отметки идут в тот предмет, что на экране.
+        name = self.subject_combo.currentText()
+        return next((folder for folder in self.folders if folder.name == name), None)
 
     # --------------------------------------------------------------- scanning
 
@@ -601,6 +718,9 @@ class AttendanceWindow(QMainWindow):
         thread.started.connect(worker.run)
         worker.mark_received.connect(self._mark_received)
         worker.rejected.connect(self._card_rejected)
+        worker.not_saved.connect(self._mark_not_saved)
+        worker.reader_lost.connect(self._reader_lost)
+        worker.reader_ready.connect(self._reader_ready)
         worker.status_changed.connect(self._scan_status)
         worker.failed.connect(self._scan_failed)
         worker.export_finished.connect(self._scan_status)
@@ -611,6 +731,7 @@ class AttendanceWindow(QMainWindow):
         thread.finished.connect(self._thread_deleted)
         self.scan_thread = thread
         self.scan_worker = worker
+        self.session_problems = worker.problems
         thread.start()
 
     def _stop_scanning(self) -> None:
@@ -621,7 +742,29 @@ class AttendanceWindow(QMainWindow):
         self.hero_hint.setText("Сохраняем отметки в файлы групп")
         self.scan_worker.stop()
 
+    def _mark_not_saved(self, message: str) -> None:
+        """Отметка не записалась: прошлый «Отмечен» на экране оставлять нельзя."""
+        error_beep()
+        self.person_name.setStyleSheet("color: #b00020; font-weight: 600;")
+        self.person_name.setText("НЕ ЗАПИСАНО")
+        self.person_meta.setText(message)
+        self.scan_status_chip.setText("Пусть студент приложит карту ещё раз")
+        self.statusBar().showMessage(message)
+
+    def _show_session_problems(self) -> None:
+        """Сказать о потерянных отметках и незаписанных файлах один раз."""
+        problems, self.session_problems = self.session_problems, []
+        if problems:
+            QMessageBox.warning(
+                self,
+                "Занятие завершено с ошибками",
+                "\n\n".join(problems) + "\n\nНезаписанных студентов отметьте вручную на "
+                "вкладке «Студенты и карты». Когда файлы освободятся, нажмите там же "
+                "«Записать в таблицы».",
+            )
+
     def _mark_received(self, result: MarkResult) -> None:
+        self.person_name.setStyleSheet("")
         self._refresh_today()
         if result.student is None:
             name = "Карта не привязана"
@@ -756,9 +899,29 @@ class AttendanceWindow(QMainWindow):
         return bound.student
 
     def _scan_status(self, message: str) -> None:
-        self.reader_title.setText("Считыватель работает")
         self.reader_detail.setText(message)
         self.statusBar().showMessage(message)
+
+    def _reader_ready(self, message: str) -> None:
+        self._reader_is_lost = False
+        self.reader_title.setStyleSheet("")
+        self.reader_title.setText("Считыватель работает")
+        self.hero_title.setText("Сканирование запущено")
+        self.hero_hint.setText("Приложите карту студента к считывателю")
+        self._scan_status(message)
+
+    def _reader_lost(self, message: str) -> None:
+        """Связи нет, карты не читаются: студенты не должны уходить, думая, что отмечены."""
+        if not self._reader_is_lost:
+            error_beep()
+        self._reader_is_lost = True
+        self.reader_title.setStyleSheet("color: #b00020; font-weight: 600;")
+        self.reader_title.setText("Считыватель отключён")
+        self.hero_title.setText("Считыватель отключён")
+        self.hero_hint.setText(
+            "Карты сейчас не читаются. Проверьте кабель: связь восстановится сама."
+        )
+        self._scan_status(message)
 
     def _scan_failed(self, message: str) -> None:
         self.reader_title.setText("Ошибка считывателя")
@@ -851,6 +1014,8 @@ class AttendanceWindow(QMainWindow):
         return True
 
     def _scan_finished(self, _tally: object) -> None:
+        self._reader_is_lost = False
+        self.reader_title.setStyleSheet("")
         self.subject_combo.setEnabled(True)
         self.scan_button.setEnabled(bool(self.folders))
         self.scan_button.setText("Начать сканирование")
@@ -859,6 +1024,7 @@ class AttendanceWindow(QMainWindow):
         self.reader_title.setText("Сканирование остановлено")
         self._refresh_today()
         self._refresh_report()
+        self._show_session_problems()
 
     def _thread_deleted(self) -> None:
         self.scan_thread = None
@@ -1047,7 +1213,13 @@ class AttendanceWindow(QMainWindow):
         folder = self._current_folder()
         if student is None or folder is None:
             return
-        at = self.manual_datetime.dateTime().toPyDateTime()
+        at = (self.manual_datetime.dateTime().toPyDateTime()
+              if self._manual_time_touched else datetime.now())
+        if at > datetime.now():
+            # В файле дата без года: будущая прочиталась бы как прошлогодняя
+            # и дала бы вторую отметку.
+            QMessageBox.warning(self, "Отметка не сохранена", "Дата и время ещё не наступили.")
+            return
         try:
             with Storage(self.db_path) as storage:
                 subject = storage.get_or_create_subject(folder.name)
@@ -1058,7 +1230,7 @@ class AttendanceWindow(QMainWindow):
                     current,
                     subject,
                     at,
-                    raw="GUI: ручная отметка",
+                    raw=MANUAL_RAW,
                 )
         except Exception as exc:
             QMessageBox.warning(self, "Отметка не сохранена", str(exc))
@@ -1071,6 +1243,7 @@ class AttendanceWindow(QMainWindow):
             ImportStatus.UPDATED: "Время отметки обновлено.",
         }
         self.statusBar().showMessage(messages[result], 7000)
+        self._reset_manual_time()
         if not self._scanning_active():
             self._export_subject_now(folder)
         self.date_edit.setDate(QDate(at.year, at.month, at.day))
@@ -1120,32 +1293,29 @@ class AttendanceWindow(QMainWindow):
         self._apply_replace(student, dialog.code)
 
     def _apply_replace(self, student: Student, code: str) -> None:
-        """Заменить карту; если она чужая — спросить, не ошибка ли привязки."""
-        take = False
-        while True:
-            try:
-                with Storage(self.db_path) as storage:
-                    result = storage.replace_card(student.id, code, take=take)
-                break
-            except CardTaken as exc:
-                owner = exc.owner
-                answer = QMessageBox.question(
-                    self,
-                    "Карта уже привязана",
-                    f"Карта {pretty_code(code)} сейчас закреплена за студентом\n"
-                    f"{owner.full_name} ({owner.group_name}).\n\n"
-                    "Если её привязали по ошибке — забрать карту и отдать "
-                    f"{student.full_name}? Отметки, сделанные этой картой, перейдут "
-                    f"к {student.full_name}, а {owner.full_name} останется без карты.",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
-                )
-                if answer != QMessageBox.Yes:
+        """Заменить карту, сперва показав, что станет с отметками.
+
+        Отметки чужой карты станут отметками этого студента, а совпавшие по
+        занятию удалятся — обратной заменой это не вернуть, поэтому спрашиваем.
+        """
+        try:
+            with Storage(self.db_path) as storage:
+                owner = None
+                try:
+                    preview = storage.preview_replace(student.id, code)
+                except CardTaken as exc:
+                    owner = exc.owner
+                    if not self._confirm_take(student, owner, code):
+                        return
+                    preview = storage.preview_replace(student.id, code, take=True)
+                if not self._confirm_marks(student, code, preview):
                     return
-                take = True
-            except Exception as exc:  # noqa: BLE001 — сказать, не терять молча
-                QMessageBox.warning(self, "Карта не заменена", str(exc))
-                return
+                if owner is not None:
+                    retract_card_marks(storage, owner, self.tables_path)
+                result = storage.replace_card(student.id, code, take=owner is not None)
+        except Exception as exc:  # noqa: BLE001 — сказать, не терять молча
+            QMessageBox.warning(self, "Карта не заменена", str(exc))
+            return
         if code in self.pending_cards:
             self.pending_cards.remove(code)
             self._refresh_pending_cards()
@@ -1159,6 +1329,46 @@ class AttendanceWindow(QMainWindow):
         self.statusBar().showMessage(", ".join(parts), 10000)
         self._after_card_change()
 
+    def _confirm_take(self, student: Student, owner: Student, code: str) -> bool:
+        swapped = (
+            "\n\nЕсли карты двух студентов перепутаны, нажмите «Нет»: снимите карту "
+            "с обоих и привяжите заново, иначе все отметки останутся за одним."
+            if student.card_code else ""
+        )
+        answer = QMessageBox.question(
+            self,
+            "Карта уже привязана",
+            f"Карта {pretty_code(code)} сейчас закреплена за студентом\n"
+            f"{owner.full_name} ({owner.group_name}).\n\n"
+            "Если её привязали по ошибке — забрать карту и отдать "
+            f"{student.full_name}? Отметки, сделанные этой картой, перейдут "
+            f"к {student.full_name} и уйдут из файла у {owner.full_name}, "
+            f"а {owner.full_name} останется без карты.{swapped}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    def _confirm_marks(self, student: Student, code: str, preview: ReplacePreview) -> bool:
+        if not preview.moved and not preview.dropped:
+            return True
+        dropped = (
+            f"\n\nНа занятиях, где отметка оказалась бы второй ({preview.dropped}), останется "
+            "более раннее время, а другая отметка будет удалена насовсем."
+            if preview.dropped else ""
+        )
+        answer = QMessageBox.question(
+            self,
+            "Отметки этой карты",
+            f"Картой {pretty_code(code)} уже отмечались. Отметок, которые перейдут "
+            f"к {student.full_name}: {preview.moved}.{dropped}\n\n"
+            "Если это карта другого человека, нажмите «Нет» и привяжите её ему: "
+            "заменой обратно это не исправить. Продолжить?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
     def _unbind_card_of_selected(self) -> None:
         student = self._selected_student()
         if student is None:
@@ -1171,8 +1381,9 @@ class AttendanceWindow(QMainWindow):
             self,
             "Снять карту?",
             f"Снять карту {pretty_code(student.card_code)} со студента {student.full_name}?\n\n"
-            "Отметки, сделанные этой картой, вернутся в «неизвестные» — их можно "
-            "будет отдать другому студенту. Отметки из таблиц останутся за ним.\n\n"
+            "Отметки, сделанные этой картой, вернутся в «неизвестные» и уйдут из файлов "
+            "групп — их можно будет отдать другому студенту. Отметки, вписанные в таблицу "
+            "руками или поставленные вручную в окне, останутся за студентом.\n\n"
             "Если студенту просто выдали новую карту, лучше «Заменить карту…»: "
             "тогда его отметки останутся при нём.",
             QMessageBox.Yes | QMessageBox.No,
@@ -1182,8 +1393,8 @@ class AttendanceWindow(QMainWindow):
             return
         try:
             with Storage(self.db_path) as storage:
-                storage.remove_student(student.card_code)
-        except Exception as exc:  # noqa: BLE001
+                unbind_card(storage, student, self.tables_path)
+        except Exception as exc:  # noqa: BLE001 — в том числе CardFilesBusy
             QMessageBox.warning(self, "Карта не снята", str(exc))
             return
         self.statusBar().showMessage(
@@ -1231,13 +1442,40 @@ class AttendanceWindow(QMainWindow):
                 10_000,
             )
             return
-        errors = [result for result in results if not result.ok]
-        if errors:
+        problems = fill_problems(results)
+        if problems:
             self.statusBar().showMessage(
-                "Отметка в базе сохранена, но один или несколько файлов Excel "
-                "не обновлены. Закройте их в Excel и повторите экспорт.",
+                f"Отметка в базе сохранена, но: {problems[0]} "
+                "Потом нажмите «Записать в таблицы».",
                 10_000,
             )
+
+    def _write_tables(self) -> None:
+        """Повторить запись в файлы: при остановке файл мог быть открыт в Excel."""
+        if self._scanning_active():
+            QMessageBox.information(
+                self,
+                "Сканирование запущено",
+                "При остановке сканирования отметки запишутся сами.",
+            )
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            with Storage(self.db_path) as storage:
+                written = fill_all(storage, self.tables_path)
+        except Exception as exc:  # noqa: BLE001 — сказать, не терять молча
+            QMessageBox.warning(self, "Таблицы не записаны", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        results = [result for group in written.values() for result in group]
+        problems = fill_problems(results)
+        self._refresh_today()
+        self._refresh_report()
+        if problems:
+            QMessageBox.warning(self, "Записаны не все таблицы", "\n\n".join(problems))
+        else:
+            self.statusBar().showMessage(f"Записано файлов групп: {len(results)}", 8000)
 
     # ------------------------------------------------------------------ helpers
 
@@ -1266,6 +1504,12 @@ class AttendanceWindow(QMainWindow):
         return f"{count} {word}"
 
     def closeEvent(self, event) -> None:  # noqa: N802 - имя Qt API
+        if self._installing_driver:
+            QMessageBox.information(
+                self, "Идёт установка драйвера", "Дождитесь окончания установки драйвера."
+            )
+            event.ignore()
+            return
         if self.scan_thread is not None and self.scan_thread.isRunning():
             answer = QMessageBox.question(
                 self,
@@ -1288,6 +1532,7 @@ class AttendanceWindow(QMainWindow):
                 )
                 event.ignore()
                 return
+            self._show_session_problems()
         event.accept()
 
 
@@ -1320,8 +1565,12 @@ def pick_home(parent: QWidget | None, start: Path | None = None) -> Path | None:
         )
         if answer != QMessageBox.Yes:
             return None
-        (home / DB_FILE.parent).mkdir(parents=True, exist_ok=True)
-        (home / TABLES_DIR).mkdir(parents=True, exist_ok=True)
+        try:
+            (home / DB_FILE.parent).mkdir(parents=True, exist_ok=True)
+            (home / TABLES_DIR).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(parent, "Папка не создана", f"{home}\n\n{exc}")
+            return None
     home = home.resolve()
     workdir.remember(home)
     return home
@@ -1340,7 +1589,32 @@ def ask_home() -> Path | None:
     return pick_home(None)
 
 
+def report_crash(kind, exc, trace) -> None:
+    """Необработанная ошибка: сказать и работать дальше.
+
+    Без этого PyQt5 завершает процесс молча: окно просто исчезает посреди пары.
+    Отметки к этому моменту в базе, а окно нужно следующему студенту.
+    """
+    if issubclass(kind, KeyboardInterrupt):
+        sys.__excepthook__(kind, exc, trace)
+        return
+    try:
+        traceback.print_exception(kind, exc, trace)
+    except Exception:  # noqa: BLE001 — у оконного exe вывода может не быть
+        pass
+    try:
+        QMessageBox.critical(
+            None,
+            "Ошибка программы",
+            f"{kind.__name__}: {exc}\n\nСохранённые отметки целы. Программа продолжает "
+            "работу; если окно ведёт себя странно, закройте и откройте его снова.",
+        )
+    except Exception:  # noqa: BLE001 — ошибка в показе ошибки не должна уронить окно
+        pass
+
+
 def _application() -> QApplication:
+    sys.excepthook = report_crash
     app = QApplication.instance()
     if not isinstance(app, QApplication):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)

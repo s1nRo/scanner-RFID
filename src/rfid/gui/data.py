@@ -15,8 +15,8 @@ from random import Random
 from .. import excel
 from ..db import DayRow, GroupStat, Storage, Student, Subject
 from ..excel import SubjectFolder
+from ..journal import roster_people, rows_of_folder, stats_of
 from ..lessons import late_arrivals
-from ..names import normalize_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,23 +74,8 @@ def load_snapshot(
 
         rows = tuple(storage.day_rows(day, subject))
         if folder is not None:
-            people = _roster_people(folder)
-            rows = tuple(
-                row for row in rows
-                if (normalize_name(row.student.full_name), row.student.group_name) in people
-            )
-            group_names = sorted({row.student.group_name for row in rows})
-            stats = tuple(
-                GroupStat(
-                    group_name,
-                    sum(row.student.group_name == group_name for row in rows),
-                    sum(
-                        row.student.group_name == group_name and row.present
-                        for row in rows
-                    ),
-                )
-                for group_name in group_names
-            )
+            rows = tuple(rows_of_folder(rows, roster_people(folder, cached_roster)))
+            stats = tuple(stats_of(rows))
         else:
             stats = tuple(storage.group_stats(day, subject))
         arrivals = {row.student: row.at for row in rows if row.at is not None}
@@ -123,20 +108,6 @@ def cached_roster(path: Path) -> excel.Roster:
     roster = excel.read_roster(path)
     _ROSTERS[path] = (stamp, roster)
     return roster
-
-
-def _roster_people(folder: SubjectFolder) -> set[tuple[str, str]]:
-    people: set[tuple[str, str]] = set()
-    for path in folder.rosters:
-        try:
-            roster = cached_roster(path)
-        except (excel.RosterError, OSError):
-            continue
-        people.update(
-            (normalize_name(student.full_name), roster.group_name)
-            for student in roster.students
-        )
-    return people
 
 
 def choose_random_late(

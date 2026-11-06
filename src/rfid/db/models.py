@@ -111,6 +111,31 @@ class CardReplaced:
     previous_owner: Student | None   # у кого карту забрали, если забрали
 
 
+@dataclass(frozen=True, slots=True)
+class Arrival:
+    """Именной приход на предмет: кто, из какой группы, когда."""
+
+    full_name: str
+    group_name: str
+    at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReplacePreview:
+    """Что сделает replace_card с отметками — показать до того, как делать."""
+
+    moved: int     # отметок новой карты станет его
+    dropped: int   # на одном занятии оказалось две: сколько удалится насовсем
+
+
+@dataclass(frozen=True, slots=True)
+class CardMark:
+    """Приход, сделанный картой: вместе с картой он уйдёт от этого человека."""
+
+    subject_name: str
+    at: datetime
+
+
 class CardConflict(Exception):
     """У человека уже есть другая карта."""
 
