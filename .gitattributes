@@ -11,3 +11,4 @@ build-portable.cmd export-ignore
 packaging/       export-ignore
 .github/         export-ignore
 *.cmd text eol=crlf
+RELEASE-TASK.md  export-ignore
